@@ -1,0 +1,246 @@
+---
+title: "Data Visualization Examples"
+author: "Osman Oguz Nuhoglu - IE360 - Spring 2021"
+---
+```{r setup, echo = FALSE, warning = FALSE, message = FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(EVDS)
+library(data.table)
+library(ggplot2)
+set_evds_key("qImjnAbNfx")
+```
+
+# 1. Introduction
+
+  Over the last couple of years, it is often reported that Turkey has been suffering from macroeconomic conditions. It is, therefore, vital to understand the characteristics of macroeconomic variables in order to improve well-being and increase overall economic performance.
+
+  In this homework, three macroeconomic variables, exchange rate (TL/$), inflation rate, and unemployment rate, are analyzed in terms of their characteristics. Also, time series data regarding those macroeconomic variables are compared with [Google Trends](https://trends.google.com/trends/?geo=TR) data to see if there is a similarity between the trends and macroeconomic variables.
+  
+  Time series data of exchange rate, consumer price index, and unemployment rate is imported from [EVDS (Electronic Data Delivery System)](https://evds2.tcmb.gov.tr/). The data is taken between 2016-02 and 2021-02. Raw data is not easily readable, therefore requires manipulation. Also, time series data for inflation rate is not available in EVDS, therefore it also requires manipulation of data to reach monthly inflation rates from CPI data. 
+  
+# 2. Analysis
+## 2.1. Data Manipulation
+### 2.1.1. Data from EVDS
+
+  The data from EVDS is imported using [EVDS package](https://algopoly.github.io/EVDS/index.html). The raw data needs to be manipulated since it is not easily readable. It looks like this: 
+
+```{r, include = F, echo = F}
+dt <- as.data.table(get_series(c("TP.DK.USD.A.YTL", "TP.FG.J0", "TP.TIG08"), start_date = "01-01-2016", end_date = "31-03-2021"))
+```
+```{r, echo =F}
+head(dt)
+```
+ 
+  Note that the data starts from 2016-01, and does not contain inflation rates initially. Since the data does not contain CPI for 2015-12, inflation rate for 2016-01 cannot be extracted. Thus, the first row of the data is deleted.
+  
+  After the necessary manipulations, the data looks like this:
+  
+```{r, include = T, echo = F, warning = F}
+setnames(dt, c("items.TP_DK_USD_A_YTL", "items.TP_FG_J0", "items.TP_TIG08"), c("Exchange_Rate", "CPI", "Unemployment_Rate"))
+#dt <- dt[-c(.N-1,.N)]  #Last 2 rows of unemployment rate data is NA.
+dt[, Date:=as.Date.POSIXct(as.numeric(items.UNIXTIME)+10000)][, c("items.Tarih", "totalCount","items.UNIXTIME") := NULL]
+dt[, Exchange_Rate := as.numeric(Exchange_Rate)][, CPI := as.numeric(CPI)][, Unemployment_Rate := as.numeric(Unemployment_Rate)]
+
+cpi_diff<-dt[,.(diff(CPI))]
+
+inflation<-cpi_diff/dt[,CPI]*100
+
+for(i in 1:62){
+  dt[i+1, CPI := inflation[i]]
+}
+setnames(dt, "CPI", "Inflation_Rate")
+dt<-dt[-1]
+head(dt)
+```
+
+### 2.1.2. Data from Google Trends
+
+  In order to see if there is a relationship between Google searches and macroeconomic variables, three keywords are selected corresponding to three macroeconomic variables. "dolar", "işsizlik maaşı", "enflasyon" are selected for exchange rate (TL/$), unemployment rate, inflation rate, respectively.
+  
+  The data from Google Trends is downloaded as csv files and then imported to R using `fread()` function. Frequency of EVDS data is monthly but Google Trends data has weekly frequency. Grouping the data by year and month, then calculating the total search volume within a month is required. 
+  
+  Initially, Google Trends data for "dolar" search volume looks like this:
+
+```{r, include = F, echo = F}
+xr_trend<-fread("dollar_trend.csv")
+```
+```{r, echo =F}
+head(xr_trend)
+```
+
+  After necessary manipulations, the same data looks like this:
+```{r, include=F, echo=F}  
+data_manip<-function(DT){
+  setnames(DT, 2, "Volume")  
+  DT<-DT[, sum(Volume), by=.(year(Hafta), month(Hafta))]
+  setnames(DT, 3, "Volume")  
+  months<-c("01","02","03","04","05","06","07","08","09","10","11","12")  
+  DT[, month := months[month]]
+  DT[, dummy_day := "01"]
+  DT[, Date := as.Date(paste(year, month, dummy_day), format = "%Y %m %d")]
+  DT[, c("year", "month", "dummy_day") := NULL]
+}
+xr_trend<-data_manip(fread("dollar_trend.csv"))
+inf_trend<-data_manip(fread("inflation_trend.csv"))
+unempr_trend<-data_manip(fread("unemp_trend.csv"))
+```
+```{r, include = T, echo = F}
+  head(xr_trend)
+
+```
+
+
+## 2.2. Visual Analysis
+### 2.2.1. Exchange Rate (TL/$)
+
+  Exchange rate is one of the most important economic variables because almost every firm uses USD at some point, and delivers good and services to Turkish customers. Thus, the larger the exchange rate, the higher the prices. It is, therefore, important to understand the characteristics of the exchange rate. 
+  The following plot shows how the exchange rate changes over time. 
+
+
+```{r, echo=FALSE}
+ggplot(dt, aes(Date)) +
+  geom_line(aes(y=Exchange_Rate)) +
+  labs(title = "Exchange Rate (TL/$) between 2016-02 and 2021-03", 
+       x = "Date",
+       y = "Exchange Rate (TL/$)") +
+  theme_minimal() +
+  scale_x_date(date_breaks = "3 months", 
+               limits = as.Date(c("2016-02-01", "2021-03-01"))) +
+  theme(axis.text.x = element_text(angle = 90))
+
+```
+
+  There is an obvious increasing trend over the years. In fact, between 2016 and 2018, the exchange rate is slightly increasing but between 2018 and 2021, there is a steep increase. Especially after 2020, the exchange rate is increasing at a high rate, probably caused by the effects of COVID-19. In general, there are many reasons for the increasing trend but most of the economists argue that the main reason is the economic and political instability in Turkey. Note that sometimes there is a huge increase resulting in a steep curve. For example, there is such an increase in the middle of 2018 caused by political tension between the U.S. and Turkey. As the U.S. pastor Andrew Brunson's motion to discharge was dismissed by the Turkish court, the exchange rate started increasing. When the pastor was discharged, the exchange rate decreased again. 
+  
+  Now that we have a basic understanding of the characteristics of the exchange rate, it is time to analyze the relationship between search volume for "dolar" keyword and the exchange rate itself.
+  
+```{r,echo=FALSE, fig.show="hold", out.width="50%", warning = F}
+
+ggplot(dt, aes(x = Date, y = Exchange_Rate)) +
+  geom_line() +
+  labs(title = "Exchange Rate (TL/$) between 2016-02 and 2021-03", 
+       x = "Date",
+       y = "Exchange Rate (TL/$)") +
+  theme_minimal() +
+  scale_x_date(date_breaks = "3 months", limits = as.Date(c("2016-02-01", "2021-03-01"))) +
+  theme(axis.text.x = element_text(angle = 90)) 
+  
+
+ggplot(xr_trend, aes(x = Date, y = Volume)) + 
+  geom_line() +
+  labs(title = "Monthly Search Volume for \"dolar\" in Google",
+       x = "Date",
+       y = "Search Volume") +
+  theme_minimal() +
+  scale_x_date(date_breaks = "3 months", 
+               limits = as.Date(c("2016-02-01", "2021-03-01"))) +
+  theme(axis.text.x = element_text(angle = 90)) 
+
+```
+
+  The overall increasing trend in the exchange rate seem to be reflected in Google Trends data. For the first couple of months, observations are roughly between 0 and 50. After 2018-07, the minimum search volume is close to 50. Note the huge search volume in 2018-07 which corresponds to the political tension between the U.S. and Turkey.
+  
+### 2.2.2. Unemployment Rate
+
+  Production level of a country shows the productivity and income of it. It is directly correlated with the unemployment rate because if the number of unemployed people is large, that is the unemployment rate is large, this means that the country does not produce as much as it can. Therefore, it also is very important to understand the characteristics of the unemployment rate. One important note about this time series data is that the data is seasonally adjusted. That is, the seasonality of the unemployment rate cannot be seen on this time series data. Instead, we can observe the long-run natural level of the unemployment rate more clearly.
+  The following plot shows how the unemployment rate changes over time. 
+
+
+```{r, echo=FALSE, warning=F}
+ggplot(dt, aes(Date)) +
+  geom_line(aes(y=Unemployment_Rate)) +
+  labs(title = "Unemployment Rate between 2016-02 and 2021-02",  #last unemployment rate observation is NA. that's why "2021-02".
+       x = "Date",
+       y = "Unemployment Rate (%)") +
+  theme_minimal() +
+  scale_x_date(date_breaks = "3 months", 
+               limits = as.Date(c("2016-02-01", "2021-02-01"))) +
+  theme(axis.text.x = element_text(angle = 90))
+
+```
+
+  The very first observation is that the unemployment rate is significantly larger than developed countries. Over the last 5 years, the minimum unemployment rate we observed is around 10%. In this plot, it is difficult to see a trend. Obviously, the average unemployment rate over the last two years is significantly larger than the average unemployment rate between 2016 and 2019, but this cannot be explained with a trend because there is an abnormal increase in 2018 which actually corresponds to exchange rate increase. In fact, the huge increase in the exchange rate occured in 2018-08 but unemployment rate can be considered as natural for Turkish economy in 2018-08. However, it not always possible to change the workforce level immediately. This is why there is a delay here. In addition, the exchange rate increase in 2018-08 showed how fragile the Turkish economy is and affected the overall performance of the economy. Thus, the unemployment rate is larger than the previous observations since then. 
+
+  After understanding the basic characteristics of the unemployment rate, we can compare it with search volume for "işsizlik maaşı". 
+
+```{r,echo=FALSE, fig.show="hold", out.width="50%", warning = F}
+
+ggplot(dt, aes(x = Date, y = Unemployment_Rate)) +
+  geom_line() +
+  labs(title = "Unemployment Rate between 2016-02 and 2021-02", 
+       x = "Date",
+       y = "Unemployment Rate (%)") +
+  theme_minimal() +
+  scale_x_date(date_breaks = "3 months", limits = as.Date(c("2016-02-01", "2021-02-01"))) +
+  theme(axis.text.x = element_text(angle = 90)) 
+  
+
+ggplot(unempr_trend, aes(x = Date, y = Volume)) + 
+  geom_line() +
+  labs(title = "Monthly Search Volume for \"işsizlik maaşı\" in Google",
+       x = "Date",
+       y = "Search Volume") +
+  theme_minimal() +
+  scale_x_date(date_breaks = "3 months", 
+               limits = as.Date(c("2016-02-01", "2021-02-01"))) +
+  theme(axis.text.x = element_text(angle = 90)) 
+
+```
+ 
+  In the search volume data, there are two peaks. First peak occurs in 2018-11 which corresponds to the steep increase in unemployment rate. Second peak, however, does not seem to be normal. Corresponding increase in unemployment rate is slight but the search volume is huge. There may be other reasons for this. For example, there might be political issues about unemployment benefit at that time.
+
+  
+### 2.2.3. Inflation Rate
+
+The last variable subject to the analysis is inflation rate. In general, it shows the overall price changes over time. It is also a very important indicator roughly showing how a country's economy performs.  
+
+As stated earlier, EVDS does not provide time series data for inflation rate. Instead, it can be extracted using CPI data. Recall that inflation rate is calculated by subtracting previous CPI from the current CPI, dividing it by previous CPI and multiplying it by 100. For detail see the Rmd file.
+
+The following plot shows how the monthly inflation rate changes over time. 
+
+```{r, echo=FALSE}
+ggplot(dt, aes(Date)) +
+  geom_line(aes(y=Inflation_Rate)) +
+  labs(title = "Inflation Rate between 2016-02 and 2021-03", 
+       x = "Date",
+       y = "Inflation Rate") +
+  theme_minimal() +
+  scale_x_date(date_breaks = "3 months", 
+               limits = as.Date(c("2016-02-01", "2021-03-01"))) +
+  theme(axis.text.x = element_text(angle = 90))
+
+```
+
+In general, there is a natural level around which the inflation rate fluctuates. The natural level is around 1%. This means that there is no trend. In addition, there are some abnormal observations. For example, monthly inflation rate in 2018-08 is around 6%. Note that many developed countries' yearly inflation rate is smaller than 6%. This large inflation rate corresponds to the increases in the exchange rate and the unemployment rate. We can rationalize this huge inflation rate with the overall economic conditions in Turkey. In the following month, however, Turkey experienced a negative inflation rate. This is hard to explain but at least we can say that it is consistent with the economic theory. That is, when the unemployment rate rises, the inflation rate decreases ([Phillips Curve](https://en.wikipedia.org/wiki/Phillips_curve)). We can also observe that there is a negative autocorrelation. That is, if the current inflation rate is large (or small), then the inflation rate tends to be small (or large) next month.
+
+After the simple analysis of characteristics of the inflation rate, we can also check if the Google Trends data for "enflasyon" keyword matches with the inflation rate.
+
+```{r,echo=FALSE, fig.show="hold", out.width="50%", warning = F}
+
+ggplot(dt, aes(x = Date, y = Inflation_Rate)) +
+  geom_line() +
+  labs(title = "Inflation Rate between 2016-02 and 2021-03", 
+       x = "Date",
+       y = "Inflation Rate (%)") +
+  theme_minimal() +
+  scale_x_date(date_breaks = "3 months", limits = as.Date(c("2016-02-01", "2021-03-01"))) +
+  theme(axis.text.x = element_text(angle = 90)) 
+  
+
+ggplot(inf_trend, aes(x = Date, y = Volume)) + 
+  geom_line() +
+  labs(title = "Monthly Search Volume for \"enflasyon\" in Google",
+       x = "Date",
+       y = "Search Volume") +
+  theme_minimal() +
+  scale_x_date(date_breaks = "3 months", 
+               limits = as.Date(c("2016-02-01", "2021-03-01"))) +
+  theme(axis.text.x = element_text(angle = 90)) 
+
+```
+
+Recall that the inflation rate of 6% in 2018-08 is very large and therefore, very large search volume is expected in 2018-08. Actually, there is a large search volume in 2018-08 but it is even larger in 2018-11. One of the reasons for this may be that people start to feel the influence of the inflation after some time. Obviously, there may be other reasons. For example, there may be a political discussion about inflation rate so that people are wondering how the inflation rate changes and search for it on Google. In addition, both data fluctuate but not always at the same time. Therefore a relevant question could be when people start to feel the impacts of the inflation. Obviously this question cannot be answered just by looking at this plot.
+
+# 3. Conclusion
+
+If a simple analysis about some variables such as macroeconomic variables is needed, data visualization is very helpful. By looking at the visualized data, many pieces of information can be extracted such as trends, abnormal observations, and seasonality effects. In this report, three macroeconomic variables, the exchange rate, the unemployment rate, and the inflation rate were analyzed visually, then they were compared with Google Trends data for some keywords. With these visual analyses, we found out both the basic characteristics of the macroeconomic variables and their relationships with Google Trends data. More specifically, the exchange rate has an increasing trend with some abnormal observations, the unemployment rate does not seem to have a trend but it looks like a step function, and the inflation rate seems to have a natural level with some abnormal observations. 
