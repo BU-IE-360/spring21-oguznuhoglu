@@ -4,4 +4,7 @@
 [Here](files/hw0.html) is my five interesting forecasting applications.
 
 ## Homework 1
-[Here](files/hw1.html) is my three data visualization examples.
+[Here](files/hw1/hw1.html) is my three data visualization examples.
+
+## Homework 2
+[Here](files/hw2/hw2.html) is my time series regression example.
