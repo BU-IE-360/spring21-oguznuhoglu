@@ -1,0 +1,391 @@
+---
+title: "Time Series Regression Analysis"
+author: "Osman Oguz Nuhoglu - IE360 - Spring 2021"
+---
+```{r setup, echo = FALSE, warning = FALSE, message = FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(data.table)
+library(ggplot2)
+library(lubridate)
+library(forecast)
+library(GGally)
+library(readxl)
+library(gridExtra)
+```
+
+
+# 1. Introduction
+  Number of houses sold in a given time period is an important economic indicator showing how economy is performing. It is, therefore, reasonable to analyze the time series data of number of first-hand houses sold month by month. In addition to this, the time series data enables us to make a forecast model to predict the number of first-hand houses sold in the next periods. The aim of this study is to come up with a model to predict number of first-hand houses sold in 2021-04. 
+  
+# 2. Analysis
+## 2.1. Data Manipulation
+The time series data of number of first-hand houses sold in each month is imported from [EVDS](https://evds2.tcmb.gov.tr/index.php?/evds/serieMarket). In addition to this, a couple of regressors, possibly related to the number of houses sold in a given month, are imported. Those regressors are number of new dwellings in each month, employment rate in each month, interest rate on bank loans for housing, and a survey data. The survey question is "The probability of buying or building a home (over the next 12 months)". It provides numeric information on tendency of people to buy a house or to build a house over the next 12 months.
+```{r, include=FALSE}
+house_sales <- as.data.table(read_excel("EVDS.xlsx"))
+```
+
+Raw data is not easily readable, therefore, requires manipulation. 
+```{r, echo=F}
+tail(house_sales)
+```
+
+The date column is added, unrelated columns are deleted and other columns are named. 
+```{r, include=FALSE}
+
+house_sales[,day:="01"]
+house_sales[,date:=as.Date.character(paste(Tarih, day), format="%Y-%m %d")]
+house_sales[, Tarih:=NULL][, day:=NULL]
+setnames(house_sales, c(1, 2, 3, 4, 5), c("sales", "employment", "rate", "survey", "new_dwellings"))
+house_sales[, sales := as.numeric(sales)][, rate := as.numeric(rate)][, survey := as.numeric(survey)][, employment := as.numeric(employment)][, new_dwellings := as.numeric(new_dwellings)]
+```
+
+```{r, echo=FALSE}
+tail(house_sales)
+```
+
+## 2.2. Visual Analysis
+There are several assumptions accompanying a regression analysis. To start with, we can check whether the normality assumption fits our data. Along with this, we can also check the correlation and scatter plots of our target value and regressors. Function `ggpairs` from the `GGally` package provides those with a single line of code.
+
+```{r, echo=T, warning=F, message=F}
+ggpairs(house_sales[, .(sales, rate, survey, employment, new_dwellings)]) 
+
+```
+
+The sales data seems to be normally distributed. Also from the scatter plots and correlation values, we can say which regressors are most related to sales data. Rate and survey data do not seem to be related to sales data. Nevertheless, all of them will be used, at least once, in our regression models. 
+To closely check the sales data, we can also plot its histogram. For now, we can accept the normality assumption. 
+
+```{r, echo=F, warning=F, message=F}
+ggplot(house_sales, aes(x=sales)) + 
+  geom_histogram(aes(y=..density..)) +
+  geom_density(alpha=.3, fill="orange", color="orange") +
+  theme_light() + 
+  labs(title="Histogram of Number of First-Hand Houses Sold in Each Month",
+       x="Number of First-hand Houses Sold",
+       y="Density")
+```
+
+## 2.3. Trend and Seasonality
+In order to see the trend and seasonality in the sales data, we can plot it.  
+
+```{r, echo=F}
+ggplot(house_sales, aes(x=date, y=sales)) + 
+  geom_line() +
+  theme_light() + 
+  labs(title="Number of First-Hand Houses Sold in Each Month",
+       x="Date",
+       y="Sales") +
+  scale_x_date(date_breaks = "5 months", 
+               limits = as.Date(c("2014-01-01", "2021-03-01"))) +
+  theme(axis.text.x = element_text(angle = 90))
+```
+
+There is an obvious seasonality effect on the data but the trend is not that obvious because at some point, the variance is increased. This actually violates our constant variance assumption, but for the sake of this analysis we can ignore it. 
+If we model this data with a trend, the predicted values and actual values would be very different. Also note that, in the first part of the data, there is a clear increasing trend, but the overall trend is decreasing.
+
+```{r, echo=T}
+house_sales[,trend:=1:.N]
+reg<-lm(sales~trend, house_sales)
+```
+```{r, echo=F, warning=F, message=F}
+summary(reg)
+house_sales[, predicted:=round(predict(reg, house_sales))]
+ggplot(house_sales, aes(x=date)) + 
+  geom_line(aes(y = sales, color = "sales")) + 
+  geom_line(aes(y = predicted, color = "predicted")) +
+  theme_light() + 
+  labs(title="Number of First-Hand Houses Sold in Each Month",
+       x="Date",
+       y="Sales") +
+  scale_x_date(date_breaks = "5 months", 
+               limits = as.Date(c("2014-01-01", "2021-03-01"))) +
+  theme(axis.text.x = element_text(angle = 90))
+```
+
+Note that p-value of F-statistic is very large indicating that the trend does not fit our data. Obviously, this is because of the change in the data. There should be a reason for this change, but this is out of the scope of this study. In order to avoid this situation, we can add a dummy variable after a point. 
+
+```{r, echo=T}
+house_sales[date >= "2019-01-01", dummy := 1]
+house_sales[is.na(dummy), dummy := 0]
+```
+
+After adding the dummy variable, we can update our model.
+
+```{r, echo=T}
+reg<-lm(sales~trend+dummy, house_sales)
+```
+
+```{r, echo=FALSE, warning=F, message=F}
+summary(reg)
+house_sales[, predicted:=round(predict(reg, house_sales))]
+ggplot(house_sales, aes(x=date)) + 
+  geom_line(aes(y = sales, color = "sales")) + 
+  geom_line(aes(y = predicted, color = "predicted")) +
+  theme_light() + 
+  labs(title="Number of First-Hand Houses Sold in Each Month",
+       x="Date",
+       y="Sales") +
+  scale_x_date(date_breaks = "5 months", 
+               limits = as.Date(c("2014-01-01", "2021-03-01"))) +
+  theme(axis.text.x = element_text(angle = 90))
+```
+
+Now, p-value for F-statistic is significantly small and we can conclude that there is a relationship. Also note that R-squared value is increased significantly. 
+
+After this point, we can add seasonality effect to our model. Firstly, to have a better understanding of the seasonality effect on the sales data, we can plot the autocorrelation function.
+
+```{r, echo=F}
+acf(house_sales[,sales], main="Autocorrelation Function of First-Hand House Sales Data")
+```
+
+The plot indicates that lag 1 and 12 have a significant effect in terms of autocorrelation. Autocorrelation at lag 12 refers to a yearly seasonality and we can add a month variable to our data to model it. Lag 1, however, requires more complicated analysis which is out of the scope. 
+
+```{r, echo=T}
+house_sales[,mon:=as.character(month(date, label=TRUE))]
+reg<-lm(sales~mon+trend+dummy, house_sales)
+```
+```{r, echo=F, warning=F, message=F}
+summary(reg)
+house_sales[, predicted:=round(predict(reg, house_sales))]
+ggplot(house_sales, aes(x=date)) + 
+  geom_line(aes(y = sales, color = "actual")) + 
+  geom_line(aes(y = predicted, color = "predicted")) +
+  theme_light() + 
+  labs(title="Number of First-Hand Houses Sold in Each Month",
+       x="Date",
+       y="Sales") +
+  scale_x_date(date_breaks = "5 months", 
+               limits = as.Date(c("2014-01-01", "2021-03-01"))) +
+  theme(axis.text.x = element_text(angle = 90))
+```
+
+Adjusted R-squared value is even larger now. At this point, there is nothing left to model in terms of trend or seasonality. Now, we can check our residuals and add the regressors to our model to see whether there is something more we can explain.
+
+
+## 2.4. Regressors
+
+As stated before, there are several variables, possibly having a relationship with the sales data. Those variables were mentioned earlier. Corresponding column names are "rate"(interest rate), "survey", "employment", and "new_dwellings".
+
+Before diving in, we can check how the residuals look at this point.
+
+```{r,echo=T}
+checkresiduals(reg)
+```
+
+Normality and zero mean assumptions seem to hold, but constant variance and independence assumptions seem to be somehow violated. Those assumptions can be improved after adding the regressors.
+
+### 2.4.1. Interest Rate on Housing Loans
+
+Interest rate is the price of loans. When interest rate increases, people decrease their demand for bank loans, hence, decrease their demand for houses. Obviously, this intuition holds only if people buy houses using a bank loan. 
+
+```{r,echo=F, warning=F, message=F}
+house_sales[, residuals:=sales-predicted]
+ggplot(house_sales, aes(x=rate, y=residuals)) + 
+  geom_point() + 
+  geom_smooth() +
+  theme_light() +
+  labs(title="Interest Rate on Housing Loans vs. Residuals",
+       x="Interest Rate on Housing Loans",
+       y="Residuals") 
+```
+
+For moderate interest rate, between 10 and 15 percent, residuals seem to be random and have zero mean. For larger interest rates, however, there seem to be a nonlinear relationship. Since there are very few of them, it would be very hard to model it. 
+
+```{r, echo=T}
+reg<-lm(sales~mon+trend+dummy+rate, house_sales)
+```
+
+```{r,echo=F, warning=F, message=F}
+summary(reg)
+house_sales[, predicted:=round(predict(reg, house_sales))]
+ggplot(house_sales, aes(x=date)) + 
+  geom_line(aes(y = sales, color = "actual")) + 
+  geom_line(aes(y = predicted, color = "predicted")) +
+  theme_light() + 
+  labs(title="Number of First-Hand Houses Sold in Each Month",
+       x="Date",
+       y="Sales") +
+  scale_x_date(date_breaks = "5 months", 
+               limits = as.Date(c("2014-01-01", "2021-03-01"))) +
+  theme(axis.text.x = element_text(angle = 90))
+
+```
+
+Although F-statistic and adjusted R-squared values are improved, the effect of interest rate on the sales data does not seem to be significant. After adding other variables to our model, p-value of "rate" variable may increase even further.
+
+We can check the residuals again.
+
+```{r,echo=T}
+checkresiduals(reg)
+```
+
+The independency assumption slightly improved after adding "rate" variable.
+
+### 2.4.2. Survey Data
+
+As mentioned earlier, the survey question is "The probability of buying or building a home (over the next 12 months)". Therefore it is closely related to our sales data.
+
+```{r,echo=F, warning=F, message=F}
+house_sales[, residuals:=sales-predicted]
+ggplot(house_sales, aes(x=survey, y=residuals)) + 
+  geom_point() + 
+  geom_smooth() +
+  theme_light() +
+  labs(title="Probability of Buying a New House vs. Residuals",
+       x="Probability",
+       y="Residuals") 
+
+```
+
+Residuals seem to be randomly distributed in this plot but the smooth curve suggests an underlying relationship. When survey variable increases, residuals tend to decrease meaning that for large survey variable, our predictions are larger than actual values. This is not expected because large survey variable means high demand for houses and large number of sales. In that case, our residuals should be positive because we should underpredict the number of houses sold. But this plot suggests that for large survey variables, we overpredict the number of houses sold.  Still we can add this variable to our model and see what changes.
+
+```{r, echo=T}
+reg<-lm(sales~mon+trend+dummy+rate+survey, house_sales)
+```
+```{r, warning=F, message=F}
+summary(reg)
+house_sales[, predicted:=predict(reg, house_sales)]
+ggplot(house_sales, aes(x=date)) + 
+  geom_line(aes(y = sales, color = "actual")) + 
+  geom_line(aes(y = predicted, color = "predicted")) +
+  theme_light() + 
+  labs(title="Number of First-Hand Houses Sold in Each Month",
+       x="Date",
+       y="Sales") +
+  scale_x_date(date_breaks = "5 months", 
+               limits = as.Date(c("2014-01-01", "2021-03-01"))) +
+  theme(axis.text.x = element_text(angle = 90))
+```
+
+Summary of the new model also suggests that survey variable does not have significant effect on sales data. In order to avoid a complex model, we move on without survey variable in our model. 
+
+### 2.4.3. Employment Rate
+
+Employment rate is very important economic variable as well as the others. Higher employment rate implies higher income and higher demand for houses.
+
+```{r, echo=FALSE, warning=F, message=F}
+reg<-lm(sales~mon+trend+dummy+rate, house_sales)
+house_sales[, predicted:=round(predict(reg, house_sales))]
+house_sales[, residuals:=sales-predicted]
+ggplot(house_sales, aes(x=employment, y=residuals)) + 
+  geom_point() + 
+  geom_smooth() +
+  theme_light() +
+  labs(title="Employment Rate vs. Residuals",
+       x="Employment Rate",
+       y="Residuals") 
+```
+
+As the plot suggests, for small employment rates, we overpredict the number of houses sold which is expected because when employment rate is small, income declines and people buy less houses. We expect to see similar trend for large employment values but there is no such a relationship. Nevertheless, we may improve our model explaining some of the overpredicted values. Another problem is that the relationship does not seem to be linear, therefore, modeling it requires more complicated analysis. We simply try to model it linearly. 
+```{r,echo=T}
+reg<-lm(sales~mon+trend+dummy+rate+employment, house_sales)
+```
+
+```{r,echo=F, warning=F, message=F}
+summary(reg)
+house_sales[, predicted:=round(predict(reg, house_sales))]
+ggplot(house_sales, aes(x=date)) + 
+  geom_line(aes(y = sales, color = "actual")) + 
+  geom_line(aes(y = predicted, color = "predicted")) +
+  theme_light() + 
+  labs(title="Number of First-Hand Houses Sold in Each Month",
+       x="Date",
+       y="Sales") +
+  scale_x_date(date_breaks = "5 months", 
+               limits = as.Date(c("2014-01-01", "2021-03-01"))) +
+  theme(axis.text.x = element_text(angle = 90))
+
+```
+
+Model suggests that there is a significant relationship between sales data and employment rate. Note the improved F-statistic and adjusted R-squared value.
+
+At this point, we can check the assumptions on residuals.
+
+```{r,echo=T}
+checkresiduals(reg)
+```
+
+Residuals look better now. We have seemingly zero mean residuals. Independency and normality of residuals improved.
+
+### 2.4.4. Number of New Dwellings
+
+Number of new dwellings should also be closely related to our target variable. Recall that our target variable is the number of first-hand houses sold. Number of new dwellings is actually the supply side of the first-hand houses.
+
+```{r, echo=F, warning=F, message=F}
+house_sales[, residuals:=sales-predicted]
+ggplot(house_sales, aes(x=new_dwellings, y=residuals)) + 
+  geom_point() + 
+  geom_smooth() +
+  theme_light() +
+  labs(title="Number of New Dwellings vs. Residuals",
+       x="Number of New Dwellings",
+       y="Residuals") 
+```
+
+Obviously, number of new dwellings does not cause people to buy houses but for small number of new dwellings, our model tends do overpredict the house sales. Again this is not a linear relationship, nevertheless, we can add this variable to our model in order to explain some of the residuals.
+
+```{r,echo=T}
+reg<-lm(sales~mon+trend+dummy+rate+employment+new_dwellings, house_sales)
+```
+
+```{r, echo=FALSE, warning=F, message=F}
+summary(reg)
+house_sales[, predicted:=predict(reg, house_sales)]
+ggplot(house_sales, aes(x=date)) + 
+  geom_line(aes(y = sales, color = "actual")) + 
+  geom_line(aes(y = predicted, color = "predicted")) +
+  theme_light() + 
+  labs(title="Number of First-Hand Houses Sold in Each Month",
+       x="Date",
+       y="Sales") +
+  scale_x_date(date_breaks = "5 months", 
+               limits = as.Date(c("2014-01-01", "2021-03-01"))) +
+  theme(axis.text.x = element_text(angle = 90))
+```
+
+F-statistic and adjusted R-squared value improved again. Note that when we first add "rate" variable to our model, its p-value was 0.07463. Now its p-value is 0.000312. This means that, when combined, our regressors may explain the residuals better. 
+
+```{r, echo=T, warning=F, message=F}
+checkresiduals(reg)
+```
+
+Adding the last variable improves the independency of residuals significantly. The high autocorrelation at lag 1 disappeared with this model. Other assumptions seem to hold as well.
+
+Before moving on, we can also evaluate the final model using scatter plots.
+
+```{r, echo = F, warning = F, message = F}
+p1 <- ggplot(house_sales, aes(x=rate, y=residuals)) + geom_point() + theme_light()
+p2 <- ggplot(house_sales, aes(x=employment, y=residuals)) + geom_point() + theme_light()
+p3 <- ggplot(house_sales, aes(x=new_dwellings, y=residuals)) + geom_point() + theme_light()
+p4 <- ggplot(house_sales, aes(x=predicted, y=residuals)) + geom_point() + theme_light() + labs(x="fitted")
+grid.arrange(p1, p2, p3, p4, nrow=2, top="Regressors vs. Residuals and Fitted vs. Residuals Scatter Plots")
+```
+
+Those scatter plots suggest that there is nothing left to explain with these regressors. Also, residuals seem to be independent of fitted values.
+
+## 2.5. Forecast
+
+The aim of this analysis is to come up with a forecasted value for the number of first-hand houses sold in 2021-04. Note that we used three regressors and 2021-04 observations for those regressors are not available. In order to predict the sales, we should come up with reasonable values for those regressors.
+
+For interest rate, we use mean value of the data. For employment rate and number of new dwellings, we use mean of observations in April because those two variables somehow show yearly seasonality effect.  
+
+```{r, echo = T}
+interest_rate <- house_sales[, mean(rate, na.rm = TRUE)]
+employment_rate <- house_sales[mon=="Apr", mean(employment, na.rm = TRUE)]
+dwellings <- house_sales[mon=="Apr", mean(new_dwellings, na.rm = TRUE)]
+```
+
+Using these values for regressors, we get the following forecasted value for 2021-04.
+
+```{r, echo = T}
+forecast <- predict(reg, data.frame(mon = "Apr",
+                        trend = house_sales[,.N] + 1,
+                        dummy = 1,
+                        rate = interest_rate, 
+                        employment = employment_rate,
+                        new_dwellings = dwellings))
+round(forecast)
+```
+
+# 3. Conclusion
+
+In this study, we try to model the number of first-hand houses sold in each month using several regressors. First, we model the trend and seasonality effect on the data. Then adding the regressors to the model one by one, we try to explain the residuals. This model is not so powerful but enough to explain some deviations around the mean. That is the adjusted R-squared value of the final model is around 60%. The aim of this study is to come up with a forecasted value of number of first-hand houses sold for 2021-04, and it is predicted as 41,774. When the data is available on EVDS, we can check the error.  
