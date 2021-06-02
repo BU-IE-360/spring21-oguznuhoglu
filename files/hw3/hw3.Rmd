@@ -1,0 +1,444 @@
+---
+title: "Time Series Analysis and Forecast using ARMA Models"
+author: "Osman Oguz Nuhoglu - IE360 - Spring 2021"
+---
+
+```{r setup, include = FALSE, echo = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(data.table)
+library(ggplot2)
+library(forecast)
+library(zoo)
+library(urca)
+```
+
+# Introduction
+
+Today, everyone uses electricity and is dependent on it. Electricity consumption is a very important variable because the price of the electricity is related to hourly consumption data. Therefore, it is a crucial practice to forecast the future electricty consumption for a firm operating in the electricity market.
+
+The aim of this report is to analyze the hourly electricity consumption data, fit an appropriate model and forecast the electricity consumption for the next two weeks.
+
+# Importing and Manipulation
+
+Hourly electricity consumption data is publicly available in [Transparency Platform by EPİAŞ](seffaflik.epias.com.tr/transparency/). In the website, there are several categories among which "realized consumption" series (under the "consumption" menu) are imported as csv file, then imported to R using `fread()`. 
+
+
+```{r, include = F, echo = F,warning = F, message = F}
+consumption = fread("RealTimeConsumption-01012016-20052021.csv")
+```
+
+After applying the following manipulation to the data, it looks like this:
+
+```{r,warning = F, message = F}
+consumption[,Date:=as.Date.character(Date, format = "%d.%m.%Y")]
+consumption[,Time:=paste(Date,Hour)]
+consumption[,Time:=as.POSIXct(Time, format = "%Y-%m-%d %H:%M", tz = "Europe/Istanbul")]
+consumption[,c("Date","Hour"):=NULL]
+setnames(consumption, 1, "Consumption")
+consumption[,Consumption:=list(gsub(pattern = ",", replacement = "", x = Consumption))]
+consumption[,Consumption:=as.numeric(Consumption)]
+head(consumption,5)
+```
+
+# Analysis
+
+## Possible Seasonality Effects
+
+In this section, we try to decompose the series at different levels considering possible seasonality effects. First, electricity consumption may depend on the hour of the day because consumption should decrease at nights since people sleep and increase in the morning. Secondly, it may depend on the day of the week because consumption should decrease at weekends. Lastly, it may depends on the month of the year because consumption may be larger in the winter and the summer but lower in the other seasons. We try to decompose the series at each one of these levels.
+
+### Decomposing at Hourly Level
+
+First, we need to smooth the data using a moving average. 
+
+```{r,warning = F, message = F}
+trend = filter(consumption[,Consumption], sides = 2, filter = rep(1/24, 24))
+hourly = data.table(consumption, data.frame(trend))
+```
+
+We can check the smoothing visually.
+
+```{r, warning = F, message = F, echo=F}
+ggplot(hourly, aes(x = Time)) +
+  geom_line(aes(y=Consumption, col="hourly consumption")) +
+  geom_line(aes(y=trend, col="trend-cycle"))
+```
+
+Now we can detrend the data and find the seasonality effect. The following plot shows the effects of each hour of the day.
+
+```{r, warning = F, message = F, echo=F}
+hourly[,detrended:=Consumption-trend]
+hourly[,seasonal:=mean(detrended, na.rm = TRUE), by = list(hour(Time))]
+ggplot(hourly[1:48], aes(x=Time, y=seasonal)) + geom_line()
+```
+
+As seen in the plot, the lowest consumption occurs at 06:00 for an average day. It increases again up to the noon, and stays at the same level until the night. Then it decreases again. 
+
+Now we can use a unit root test to the random component to determine whether it is stationary or not.
+
+```{r, warning = F, message = F, echo=F}
+hourly[, random:= detrended-seasonal]
+summary(ur.kpss(hourly[,random]))
+```
+
+Even though the test statistic is very small and stationarity assumption makes sense, there is still a seasonality effect suggested by the following ACF.
+
+```{r, warning = F, message = F, echo=F}
+ggAcf(hourly[,random],lag.max=168)
+```
+
+### Decomposing at Daily Level
+
+In order to decompose the series at daily level, we need daily mean consumption because we want to see the mean effect of each day. The following lines of code is a transition from the hourly series to the daily series and smoothing it.
+
+```{r, warning = F, message = F}
+daily = consumption[, list(Consumption=mean(Consumption, na.rm=TRUE)), by=list(as.Date(Time+10000))]
+trend = filter(daily[,Consumption], sides = 2, filter = rep(1/7, 7))
+daily = data.table(daily, trend)
+setnames(daily, 1, "Time")
+```
+
+Visually we have,
+
+```{r, warning = F, message = F, echo=F}
+ggplot(daily, aes(x = Time)) +
+  geom_line(aes(y=Consumption, col="mean consumption daily")) +
+  geom_line(aes(y=trend, col="trend-cycle"))
+```
+
+The curve smooths the series better now, as expected. Now we can detrend the data and see the weekly seasonality effect.
+
+```{r, warning = F, message = F, echo=F}
+daily[,detrended:=Consumption-trend]
+daily[,seasonal:=mean(detrended, na.rm = TRUE), by=list(wday(Time))]
+ggplot(daily[1:14], aes(x=Time, y=seasonal)) + geom_line()
+```
+
+We clearly see the mean effects of days. Consumption is lower at weekend, especially on Sunday. The Weekdays have similar effects.
+
+For stationarity,
+
+```{r, warning = F, message = F, echo=F}
+daily[, random:= detrended-seasonal]
+summary(ur.kpss(daily[,random]))
+```
+
+Again the KPSS test suggests stationarity and the following ACF suggests that seasonality loses its effect.
+
+```{r, warning = F, message = F,  fig.show="hold", out.width="50%", echo=F}
+ggAcf(daily[,random], lag.max=31)
+ggPacf(daily[,random], lag.max=31)
+```
+
+### Decomposing at Monthly Level
+
+For decomposing the series at monthly level, we need daily mean consumption because we want to see the mean effect of each month. We need to manipulate the data to achieve this.
+
+```{r, warning = F, message = F}
+monthly = daily[, list(Consumption=mean(Consumption, na.rm=TRUE)), by=list(month(Time), year(Time))]
+months<-c("01","02","03","04","05","06","07","08","09","10","11","12")  
+monthly[, month := months[month]]
+monthly[, dummy_day := "01"]
+monthly[, Time := as.Date(paste(year, month, dummy_day), format = "%Y %m %d")]
+monthly[, c("month", "year", "dummy_day"):=NULL]
+trend = filter(monthly[, Consumption], sides = 2, filter = rep(1/12,12))
+monthly = data.table(monthly, trend)
+```
+
+Now we have trend-cycle component and we can plot it.
+
+```{r, warning = F, message = F, echo=F}
+ggplot(monthly, aes(x = Time)) +
+  geom_line(aes(y=Consumption, col="mean consumption monthly")) +
+  geom_line(aes(y=trend, col="trend-cycle"))
+```
+
+The smoothed curve is very insensitive. It only shows a general trend. Level of smoothness is larger than before.
+
+The following plot shows the seasonality effect.
+
+```{r, warning = F, message = F, echo=F}
+monthly[,detrended:=Consumption-trend]
+monthly[,seasonal:=mean(detrended, na.rm = TRUE), by=list(month(Time))]
+ggplot(monthly[1:24], aes(x=Time, y=seasonal)) + geom_line()
+```
+
+We see that electricity consumption increases in the winter, more specifically in December, January, February. In March, April, and May, consumption is lower but it increases and reach its maximum value in July and August. Then it decreases again. 
+
+For stationarity,
+
+```{r, warning = F, message = F, echo=F}
+monthly[, random:= detrended-seasonal]
+summary(ur.kpss(monthly[,random]))
+```
+
+Again we have a small test statistic which implies stationarity. 
+
+```{r, warning = F, message = F,  fig.show="hold", out.width="50%", echo=F}
+ggAcf(monthly[,random], lag.max=12)
+ggPacf(monthly[,random], lag.max=12)
+```
+
+With this decomposition, we have eliminated all kinds of seasonality effects. There is no significant spike on neither ACF nor PACF.
+
+## Modeling the Series
+
+Before modeling, We use the last 14 days' observations as the test set and the remaining as the training set. 
+
+```{r, warning = F, message = F, include=F}
+test = consumption[(.N-335):.N]
+consumption = consumption[-((.N-335):.N)]
+```
+
+In the previous section, we see that there are two significant seasonality effect. One of them is daily seasonality and the other one is weekly effect. There is also the yearly seasonality but it is not as significant as the others. Instead of decomposing the data at monthly level, we can decompose the series assuming the frequency is 168. After smoothing the series, we can check the trend-cycle component visually.
+
+
+```{r, warning = F, message = F}
+trend = filter(consumption[,Consumption], sides = 2, filter = rep(1/168, 168))
+consumption = data.table(consumption, trend)
+```
+
+```{r, warning = F, message = F, echo=F}
+ggplot(consumption, aes(x = Time)) +
+  geom_line(aes(y=Consumption, col="hourly consumption")) +
+  geom_line(aes(y=trend, col="trend-cycle component"))
+```
+
+```{r, warning = F, message = F, echo=F}
+head(consumption)
+```
+
+There are several NAs in trend variable both in the head and in the tail of the data. Later, when we try to forecast the data, we will need trend values for all data points. In order to fill them, we can use `auto.arima()` to quickly fill them. Note that the use of `auto.arima()` is only for forecasting the trend variable. When we try to model the random component, we don't use `auto.arima()`. The order of the trend model is not important, so we only make forecast and skip this part instead of analyzing it.
+
+
+```{r, warning = F, message = F}
+trend = consumption[!is.na(trend),trend]
+trend = ts(trend, freq = 1)
+m = auto.arima(trend, seasonal = F, stepwise = F, approx = F)
+trend_forecast = forecast(m, h = 420)
+trend_train = trend_forecast$mean[1:84]
+trend_test = trend_forecast$mean[85:420]
+consumption[(.N-83):.N, trend:=trend_train]
+test[,trend:=trend_test]
+```
+
+We can now detrend the series in order to obtain seasonality effects. The following plot shows the seasonality effects of each individual season. Recall that the frequency is 168.
+
+```{r, warning = F, message = F}
+consumption[, detrended:=Consumption-trend]
+consumption[, seasonal:=mean(detrended, na.rm = TRUE), by=list(wday(Time),hour(Time))]
+```
+
+```{r, warning = F, message = F, echo=F}
+ggplot(consumption[1:168], aes(x=Time, y=seasonal)) + geom_line()
+```
+
+Now we can obtain the random component and visually check it.
+
+```{r, warning = F, message = F}
+consumption[, random:=detrended-seasonal]
+```
+
+```{r, warning = F, message = F, echo=F}
+ggplot(consumption, aes(x=Time, y=random)) + geom_line()
+```
+
+The random component looks fine except a couple of outlier points which we can neglect for now. We can check the stationarity using the KPSS test.
+
+```{r, warning = F, message = F, echo=F}
+summary(ur.kpss(consumption[,random]))
+```
+
+Test statistic is small enough so that we can assume that the series is stationary. We can also check the independency of the series.
+
+```{r, warning = F, message = F,  fig.show="hold", out.width="50%", echo=F}
+ggAcf(consumption[,random], lag.max=168)
+ggPacf(consumption[,random], lag.max=168)
+```
+
+
+ACF and PACF suggest that the series may not be properly modeled by AR(p) or MA(q), and more complicated models may be required. 
+
+### AR Models
+
+At this point, we can try to fit an AR model to the random component. We can use several lags and determine the best in terms of AIC.
+
+```{r, warning = F, message = F}
+ar1 = arima(consumption[,random], order = c(1,0,0))
+ar2 = arima(consumption[,random], order = c(2,0,0))
+ar3 = arima(consumption[,random], order = c(3,0,0))
+ar4 = arima(consumption[,random], order = c(4,0,0))
+ar5 = arima(consumption[,random], order = c(5,0,0))
+c(ar1=AIC(ar1), ar2=AIC(ar2), ar3=AIC(ar3), ar4=AIC(ar4), ar5=AIC(ar5))
+
+```
+
+ar4 gives the best result in terms of AIC.
+
+### MA Models
+
+We can also try to fit an MA model. Again following the same procedure,
+
+```{r, warning = F, message = F}
+ma1 = arima(consumption[,random], order = c(0,0,1))
+ma2 = arima(consumption[,random], order = c(0,0,2))
+ma3 = arima(consumption[,random], order = c(0,0,3))
+ma4 = arima(consumption[,random], order = c(0,0,4))
+ma5 = arima(consumption[,random], order = c(0,0,5))
+c(ma1=AIC(ma1), ma2=AIC(ma2), ma3=AIC(ma3), ma4=AIC(ma4), ma5=AIC(ma5))
+```
+
+ma5 gives the best result. Note that AIC value keeps decreasing and we may achieve a less AIC value if we keep increasing q value but that would be inefficient and time consuming. For that reason, MA(5) is the last model we evaluate. 
+
+### ARMA Models
+
+So far we tried a couple of AR and MA models among which ar4 and ma5 give better results. If we compare ar4 and ma5, ar4 is better in terms of AIC but this does not necessarily mean that AR(4) is enough to model the series. We now can try to model the series using ARMA(p,q).
+
+We start with combining AR(4) and MA(5) as ARMA(4,5).
+
+```{r, warning = F, message = F}
+model1 = arima(consumption[,random], order = c(4,0,5))
+AIC(model1)
+```
+
+To decrease the complexity of the model, we can try to decrease the values of the parameters.
+
+```{r, warning = F, message = F}
+model2 = arima(consumption[,random], order = c(3,0,4))
+AIC(model2)
+```
+
+It turns out that ARMA(3,4) is better than ARMA(4,5) in terms of AIC.
+
+The AIC is only slightly less then AIC of AR(4). We can try to achieve a better model by examining ACF and PACF of the residuals. 
+
+```{r, warning = F, message = F, echo=F,fig.show="hold", out.width="50%"}
+ggAcf(residuals(model2), lag.max=168)
+ggPacf(residuals(model2), lag.max=168)
+```
+
+Both functions suggest that there is a seasonality effect. We can add lagged variables to our model as an exogenous regressor. 
+
+### ARMAX Models
+
+Here, we add the consumption data at lag 24 as the regressor.
+
+```{r, warning = F, message = F}
+consumption[,lag_24:=shift(random,24)]
+reg_matrix=matrix(consumption[,lag_24], ncol = 1)
+model3 = arima(consumption[,random], order = c(3,0,4), xreg = reg_matrix)
+AIC(model3)
+```
+
+AIC value decreased significantly. We can also check ACF and PACF to see whether the seasonality effect is still there.
+
+```{r, warning = F, message = F,fig.show="hold", out.width="50%", echo=F}
+ggAcf(residuals(model3), lag.max=168)
+ggPacf(residuals(model3), lag.max=168)
+
+```
+
+At lag 168, we see a significant autocorrelation. We can also add lag 168 to the model.
+
+```{r, warning = F, message = F}
+consumption[,lag_24:=shift(random,24)]
+consumption[,lag_168:=shift(random,168)]
+reg_matrix=matrix(c(consumption[,lag_24],consumption[,lag_168]), byrow = F, ncol = 2)
+model4 = arima(consumption[,random], order = c(3,0,4), xreg = reg_matrix)
+AIC(model4)
+```
+
+Again, AIC value decreased significantly and in the following ACF and PACF, residuals seem to be more independent.
+
+```{r, warning = F, message = F,echo=F,fig.show="hold", out.width="50%"}
+ggAcf(residuals(model4), lag.max=168)
+ggPacf(residuals(model4), lag.max=168)
+
+```
+
+
+
+## Forecast and Evaluation
+
+First let's see how the model fits the training data.
+
+```{r, warning = F, message = F, echo=F}
+consumption[,res:=residuals(model4)]
+consumption[,fitted:=random-res]
+consumption[,fitted:=as.numeric(fitted)+as.numeric(trend)+as.numeric(seasonal)]
+
+ggplot(consumption, aes(x=Time)) + 
+  geom_line(aes(y=Consumption, col="actual")) + 
+  geom_line(aes(y=fitted, col="fitted"))
+```
+
+They seem to be matched very well.
+
+Now we need regressors values to make forecast. Those variables are `lag_24` and `lag_168`. We need to extract those variables in order to use them. 
+
+```{r, warning = F, message = F}
+test[,lag_24:=c(consumption[(.N-23):.N, random],rep(NA,nrow(test)-24))]
+test[,lag_168:=c(consumption[(.N-167):.N, random],rep(NA,nrow(test)-168))]
+```
+
+Now we can recursively obtain forecasted values for random component for the test set. Variable `random` in the test data is actually the forecasted values for random component. At first, we have only 24 rows of regressor available, thus we can only make forecasts for the following 24 hours. After we have those values, we can use them as regressors for the next 24 hours. This goes on like this until all the forecasts are available.
+
+```{r, warning = F, message = F}
+
+test[,random:=NA]
+
+while( sum(is.na(test[,random]))>0 ){
+  reg = matrix(c(test[,lag_24],test[,lag_168]), ncol = 2, byrow = F)
+  forecasted = predict(model4, newxreg = reg)
+  test[,random:=forecasted$pred]
+  test[,shifted_24:=shift(random,24)]
+  test[,shifted_168:=shift(random,168)]
+  test[is.na(lag_24),lag_24:=shifted_24]
+  test[is.na(lag_168), lag_168:=shifted_168]
+}
+
+test[,seasonal:=consumption[1:336,seasonal]]
+test[,forecast:=as.numeric(random)+as.numeric(seasonal)+as.numeric(trend)]
+
+```
+
+In order to evaluate our model on the test data, we can first visualize the data and then use several measures.
+
+```{r, warning = F, message = F, echo=F}
+ggplot(test, aes(x=Time)) +
+  geom_line(aes(y=Consumption, col="actual")) +
+  geom_line(aes(y=forecast, col="forecast"))
+```
+
+For some days, the model cannot capture the movement and make large errors, but for other days, the model do a very good job.  
+
+To evaluate the model, we can use daily MAPE, daily bias, and overall MAPE, bias and WMAPE. The following function provide those measures along with some additional characteristics such as mean, standard deviation etc.
+
+```{r, warning = F, message = F}
+accu=function(actual,forecast){
+  n=length(actual)
+  error=actual-forecast
+  mean=mean(actual)
+  sd=sd(actual)
+  CV=sd/mean
+  bias=sum(error)/sum(actual)
+  MAPE=sum(abs(error/actual))/n
+  MAD=sum(abs(error))/n
+  WMAPE=MAD/mean
+  l=data.frame(n,mean,sd,CV,bias,MAPE,WMAPE)
+  return(l)
+}
+test[,accu(Consumption, forecast)]
+
+test[,error:=Consumption-forecast]
+test[,ape:=abs(error/Consumption)]
+test[,bias:=error/Consumption]
+ac = test[,.(daily_mape=sum(ape)/24, daily_bias=sum(bias)/24), by=.(Date=as.Date(Time))]
+ac
+
+```
+
+Daily bias and daily MAPE are large on some days but in general, they are small enough. Overall bias, MAPE and WMAPE are small enough, as well.
+
+# Conclusion
+
+In conclusion, we first tried to understand the characteristics of the series by decomposing at different levels. Then we tried to fit a model on random component of the decomposition at frequency of 168. Among several AR(p), MA(q), and ARMA(p,q) models, ARMA(3,4) gives the best result. We achieved to improve our model's performance by introducing the same variable at lag 24 and lag 168 as exogenous regressors. The final model performs well on the test data. 

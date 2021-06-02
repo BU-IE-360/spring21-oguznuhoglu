@@ -8,3 +8,6 @@
 
 ## Homework 2
 [Here](files/hw2/hw2.html) is my time series regression analysis.
+
+## Homework 3
+[Here](files/hw3/hw3.html) is my time series forecasting study.
