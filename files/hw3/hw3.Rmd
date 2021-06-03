@@ -60,15 +60,27 @@ We can check the smoothing visually.
 ```{r, warning = F, message = F, echo=F}
 ggplot(hourly, aes(x = Time)) +
   geom_line(aes(y=Consumption, col="hourly consumption")) +
-  geom_line(aes(y=trend, col="trend-cycle"))
+  geom_line(aes(y=trend, col="trend-cycle")) +
+  theme_bw() +
+  labs(title="Hourly Consumption Series and Trend-Cycle Component",
+       x="Time",
+       y="Consumption") 
 ```
 
 Now we can detrend the data and find the seasonality effect. The following plot shows the effects of each hour of the day.
 
-```{r, warning = F, message = F, echo=F}
+```{r, warning = F, message = F}
 hourly[,detrended:=Consumption-trend]
 hourly[,seasonal:=mean(detrended, na.rm = TRUE), by = list(hour(Time))]
-ggplot(hourly[1:48], aes(x=Time, y=seasonal)) + geom_line()
+```
+
+```{r, warning = F, message = F, echo=F}
+ggplot(hourly[1:48], aes(x=Time, y=seasonal)) + 
+  geom_line() +  
+  theme_bw() +
+  labs(title="Daily Seasonality Effect",
+       x="Time",
+       y="Mean Effect")  
 ```
 
 As seen in the plot, the lowest consumption occurs at 06:00 for an average day. It increases again up to the noon, and stays at the same level until the night. Then it decreases again. 
@@ -83,7 +95,10 @@ summary(ur.kpss(hourly[,random]))
 Even though the test statistic is very small and stationarity assumption makes sense, there is still a seasonality effect suggested by the following ACF.
 
 ```{r, warning = F, message = F, echo=F}
-ggAcf(hourly[,random],lag.max=168)
+ggAcf(hourly[,random],lag.max=168) +
+  theme_bw() +
+  labs(title="ACF of Random Component") 
+ 
 ```
 
 ### Decomposing at Daily Level
@@ -102,15 +117,27 @@ Visually we have,
 ```{r, warning = F, message = F, echo=F}
 ggplot(daily, aes(x = Time)) +
   geom_line(aes(y=Consumption, col="mean consumption daily")) +
-  geom_line(aes(y=trend, col="trend-cycle"))
+  geom_line(aes(y=trend, col="trend-cycle")) +
+  theme_bw() +
+  labs(title="Daily Mean Consumption Series and Trend-Cycle Component",
+       x="Time",
+       y="Consumption") 
 ```
 
 The curve smooths the series better now, as expected. Now we can detrend the data and see the weekly seasonality effect.
 
-```{r, warning = F, message = F, echo=F}
+```{r, warning = F, message = F}
 daily[,detrended:=Consumption-trend]
 daily[,seasonal:=mean(detrended, na.rm = TRUE), by=list(wday(Time))]
-ggplot(daily[1:14], aes(x=Time, y=seasonal)) + geom_line()
+```
+
+```{r, warning = F, message = F, echo=F}
+ggplot(daily[1:14], aes(x=Time, y=seasonal)) + 
+  geom_line() +
+  theme_bw() +
+  labs(title="Weekly Seasonality Effect",
+       x="Time",
+       y="Mean Effect")   
 ```
 
 We clearly see the mean effects of days. Consumption is lower at weekend, especially on Sunday. The Weekdays have similar effects.
@@ -125,8 +152,10 @@ summary(ur.kpss(daily[,random]))
 Again the KPSS test suggests stationarity and the following ACF suggests that seasonality loses its effect.
 
 ```{r, warning = F, message = F,  fig.show="hold", out.width="50%", echo=F}
-ggAcf(daily[,random], lag.max=31)
-ggPacf(daily[,random], lag.max=31)
+ggAcf(daily[,random], lag.max=31) +   theme_bw() +
+  labs(title="ACF of the Random Component") 
+ggPacf(daily[,random], lag.max=31) +  theme_bw() +
+  labs(title="PACF of the Random Component") 
 ```
 
 ### Decomposing at Monthly Level
@@ -149,17 +178,28 @@ Now we have trend-cycle component and we can plot it.
 ```{r, warning = F, message = F, echo=F}
 ggplot(monthly, aes(x = Time)) +
   geom_line(aes(y=Consumption, col="mean consumption monthly")) +
-  geom_line(aes(y=trend, col="trend-cycle"))
+  geom_line(aes(y=trend, col="trend-cycle")) +
+  theme_bw() +
+  labs(title="Monthly Mean Consumption Series and Trend-Cycle Component",
+       x="Time",
+       y="Consumption") 
 ```
 
-The smoothed curve is very insensitive. It only shows a general trend. Level of smoothness is larger than before.
+The level of smoothness is increased further. It only shows a general trend.
 
 The following plot shows the seasonality effect.
 
-```{r, warning = F, message = F, echo=F}
+```{r, warning = F, message = F}
 monthly[,detrended:=Consumption-trend]
 monthly[,seasonal:=mean(detrended, na.rm = TRUE), by=list(month(Time))]
-ggplot(monthly[1:24], aes(x=Time, y=seasonal)) + geom_line()
+```
+
+```{r, warning = F, message = F, echo=F}
+ggplot(monthly[1:24], aes(x=Time, y=seasonal)) + geom_line() +
+  theme_bw() +
+  labs(title="Yearly Seasonality Effect",
+       x="Time",
+       y="Mean Effect") 
 ```
 
 We see that electricity consumption increases in the winter, more specifically in December, January, February. In March, April, and May, consumption is lower but it increases and reach its maximum value in July and August. Then it decreases again. 
@@ -174,8 +214,10 @@ summary(ur.kpss(monthly[,random]))
 Again we have a small test statistic which implies stationarity. 
 
 ```{r, warning = F, message = F,  fig.show="hold", out.width="50%", echo=F}
-ggAcf(monthly[,random], lag.max=12)
-ggPacf(monthly[,random], lag.max=12)
+ggAcf(monthly[,random], lag.max=12) +  theme_bw() +
+  labs(title="ACF of Random Component") 
+ggPacf(monthly[,random], lag.max=12) +  theme_bw() +
+  labs(title="PACF of Random Component") 
 ```
 
 With this decomposition, we have eliminated all kinds of seasonality effects. There is no significant spike on neither ACF nor PACF.
@@ -184,7 +226,7 @@ With this decomposition, we have eliminated all kinds of seasonality effects. Th
 
 Before modeling, We use the last 14 days' observations as the test set and the remaining as the training set. 
 
-```{r, warning = F, message = F, include=F}
+```{r, warning = F, message = F}
 test = consumption[(.N-335):.N]
 consumption = consumption[-((.N-335):.N)]
 ```
@@ -200,7 +242,11 @@ consumption = data.table(consumption, trend)
 ```{r, warning = F, message = F, echo=F}
 ggplot(consumption, aes(x = Time)) +
   geom_line(aes(y=Consumption, col="hourly consumption")) +
-  geom_line(aes(y=trend, col="trend-cycle component"))
+  geom_line(aes(y=trend, col="trend-cycle component")) +
+  theme_bw() +
+  labs(title="Trend-Cycle Component at Frequency 168",
+       x="Time",
+       y="Consumption") 
 ```
 
 ```{r, warning = F, message = F, echo=F}
@@ -229,7 +275,11 @@ consumption[, seasonal:=mean(detrended, na.rm = TRUE), by=list(wday(Time),hour(T
 ```
 
 ```{r, warning = F, message = F, echo=F}
-ggplot(consumption[1:168], aes(x=Time, y=seasonal)) + geom_line()
+ggplot(consumption[1:168], aes(x=Time, y=seasonal)) + geom_line() +
+  theme_bw() +
+  labs(title="Weekly and Daily Seasonality Effect",
+       x="Time",
+       y="Mean Effect") 
 ```
 
 Now we can obtain the random component and visually check it.
@@ -239,10 +289,14 @@ consumption[, random:=detrended-seasonal]
 ```
 
 ```{r, warning = F, message = F, echo=F}
-ggplot(consumption, aes(x=Time, y=random)) + geom_line()
+ggplot(consumption, aes(x=Time, y=random)) + geom_line() +
+  theme_bw() +
+  labs(title="Random Component",
+       x="Time",
+       y="Random Component") 
 ```
 
-The random component looks fine except a couple of outlier points which we can neglect for now. We can check the stationarity using the KPSS test.
+The random component looks fine except a couple of outlier points which we can neglect for now. We can check the stationarity using the KPSS unit root test.
 
 ```{r, warning = F, message = F, echo=F}
 summary(ur.kpss(consumption[,random]))
@@ -251,8 +305,10 @@ summary(ur.kpss(consumption[,random]))
 Test statistic is small enough so that we can assume that the series is stationary. We can also check the independency of the series.
 
 ```{r, warning = F, message = F,  fig.show="hold", out.width="50%", echo=F}
-ggAcf(consumption[,random], lag.max=168)
-ggPacf(consumption[,random], lag.max=168)
+ggAcf(consumption[,random], lag.max=168) +  theme_bw() +
+  labs(title="ACF of Random Component") 
+ggPacf(consumption[,random], lag.max=168) +  theme_bw() +
+  labs(title="PACF of Random Component") 
 ```
 
 
@@ -312,8 +368,10 @@ It turns out that ARMA(3,4) is better than ARMA(4,5) in terms of AIC.
 The AIC is only slightly less then AIC of AR(4). We can try to achieve a better model by examining ACF and PACF of the residuals. 
 
 ```{r, warning = F, message = F, echo=F,fig.show="hold", out.width="50%"}
-ggAcf(residuals(model2), lag.max=168)
-ggPacf(residuals(model2), lag.max=168)
+ggAcf(residuals(model2), lag.max=168) +  theme_bw() +
+  labs(title="ACF of the Residuals") 
+ggPacf(residuals(model2), lag.max=168) +  theme_bw() +
+  labs(title="PACF of the Residuals") 
 ```
 
 Both functions suggest that there is a seasonality effect. We can add lagged variables to our model as an exogenous regressor. 
@@ -332,8 +390,10 @@ AIC(model3)
 AIC value decreased significantly. We can also check ACF and PACF to see whether the seasonality effect is still there.
 
 ```{r, warning = F, message = F,fig.show="hold", out.width="50%", echo=F}
-ggAcf(residuals(model3), lag.max=168)
-ggPacf(residuals(model3), lag.max=168)
+ggAcf(residuals(model3), lag.max=168) +  theme_bw() +
+  labs(title="ACF of the Residuals") 
+ggPacf(residuals(model3), lag.max=168) +  theme_bw() +
+  labs(title="PACF of the Residuals") 
 
 ```
 
@@ -350,8 +410,10 @@ AIC(model4)
 Again, AIC value decreased significantly and in the following ACF and PACF, residuals seem to be more independent.
 
 ```{r, warning = F, message = F,echo=F,fig.show="hold", out.width="50%"}
-ggAcf(residuals(model4), lag.max=168)
-ggPacf(residuals(model4), lag.max=168)
+ggAcf(residuals(model4), lag.max=168) +  theme_bw() +
+  labs(title="ACF of the Residuals") 
+ggPacf(residuals(model4), lag.max=168) +  theme_bw() +
+  labs(title="PACF of the Residuals") 
 
 ```
 
@@ -361,17 +423,33 @@ ggPacf(residuals(model4), lag.max=168)
 
 First let's see how the model fits the training data.
 
-```{r, warning = F, message = F, echo=F}
+```{r, warning = F, message = F}
 consumption[,res:=residuals(model4)]
 consumption[,fitted:=random-res]
 consumption[,fitted:=as.numeric(fitted)+as.numeric(trend)+as.numeric(seasonal)]
-
-ggplot(consumption, aes(x=Time)) + 
-  geom_line(aes(y=Consumption, col="actual")) + 
-  geom_line(aes(y=fitted, col="fitted"))
 ```
 
-They seem to be matched very well.
+```{r, warning = F, message = F, echo=F}
+ggplot(consumption, aes(x=Time)) + 
+  geom_line(aes(y=Consumption, col="actual")) + 
+  geom_line(aes(y=fitted, col="fitted")) +
+    theme_bw() +
+  labs(title="Actual and Forecasted Values Together on Training Data",
+       x="Time",
+       y="Consumption") 
+```
+
+They seem to be matched very well. We can also look more closely.
+
+```{r, warning = F, message = F, echo=F}
+ggplot(consumption[as.Date(Time)<="2018-01-31" & as.Date(Time)>="2018-01-01"], aes(x=Time)) + 
+  geom_line(aes(y=Consumption, col="actual")) + 
+  geom_line(aes(y=fitted, col="fitted")) +
+    theme_bw() +
+  labs(title="Actual and Forecasted Values Together on Training Data",
+       x="Time",
+       y="Consumption") 
+```
 
 Now we need regressors values to make forecast. Those variables are `lag_24` and `lag_168`. We need to extract those variables in order to use them. 
 
@@ -406,7 +484,11 @@ In order to evaluate our model on the test data, we can first visualize the data
 ```{r, warning = F, message = F, echo=F}
 ggplot(test, aes(x=Time)) +
   geom_line(aes(y=Consumption, col="actual")) +
-  geom_line(aes(y=forecast, col="forecast"))
+  geom_line(aes(y=forecast, col="forecast")) +
+  theme_bw() +
+  labs(title="Actual and Forecasted Values Together on Test Data",
+       x="Time",
+       y="Consumption") 
 ```
 
 For some days, the model cannot capture the movement and make large errors, but for other days, the model do a very good job.  
