@@ -1,0 +1,430 @@
+---
+title: 'Final Exam - IE 360 Spring 2021 '
+author: "Osman Oguz Nuhoglu"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(data.table)
+library(ggplot2)
+library(forecast)
+library(urca)
+library(zoo)
+```
+
+## INTRODUCTION
+
+People depend on electricity and therefore electricity production business is a very important business today. It requires challenging practices such as forecasting the next periods consumption so that a price for electricity can be determined. This way, firms can provide the best offer to produce the electricity. 
+
+This study aims to make a forecast for a specified time period. After analyzing the data, we try several models and choose the best one. That model will make forecasts for the specified test period.
+
+Variables are self explanatory and can be seen in the structure of the data below.
+
+## ANALYSIS
+
+```{r,warning = F, message = F}
+data=fread("mcp_with_variables.csv", header=TRUE)
+str(data)
+hours<-c("00:00","01:00","02:00","03:00","04:00","05:00","06:00","07:00","08:00","09:00","10:00",
+       "11:00","12:00","13:00","14:00","15:00","16:00","17:00","18:00","19:00","20:00","21:00",
+       "22:00","23:00")
+data[,hour:=hours[hour+1]]
+data[,time:=paste(date,hour)]
+data[,time:=as.POSIXct(time, format = "%Y-%m-%d %H:%M", tz = "Europe/Istanbul")]
+data[,c("date","hour"):=NULL]
+```
+
+There is no need for further manipulation. We can check how the time series of different currencies look.
+
+
+```{r,warning = F, message = F}
+ggplot(data, aes(x=time)) +
+  geom_line(aes(y=mcp_try, col="TRY")) +
+  geom_line(aes(y=mcp_dollars, col="USD")) +
+  geom_line(aes(y=mcp_euro, col="EUR")) 
+```
+
+TRY does not seem to be stable. This could be said even without looking at the plot. TRY has been experiencing a high inflation and depreciation for a long period of time.
+```{r,warning = F, message = F}
+ggplot(data, aes(x=time)) +
+  geom_line(aes(y=mcp_dollars, col="USD")) +
+    geom_line(aes(y=mcp_euro, col="EUR")) 
+```
+
+EUR and USD look very similar, any one can be used for forecasting purposes. I choose USD since it is more popular than EUR. 
+
+```{r,warning = F, message = F}
+ggplot(data, aes(x=time)) +
+  geom_line(aes(y=mcp_dollars, col="USD"))
+```
+
+There are some outlier points which we can ignore for now. The general trend seems stable despite the fact that it fluctuates a lot, but clearly the series has a non-constant variance which may affect stationarity. Seasonality effect cannot be seen from this plot but we can check it later in more detail. Therefore, the time series does not seem stationary. The following unit root test suggests the same.
+
+```{r,warning = F, message = F}
+summary(ur.kpss(data[,mcp_dollars]))
+```
+
+Now we can check seasonality by checking the ACF.
+
+```{r,warning = F, message = F}
+acf(data[,mcp_dollars], lag.max = 170, main="The ACF of the Time Series")
+```
+
+Significant autocorrelations at lags 24, 48, 72 etc. imply the daily seasonality effect. There may be other seasonality effects as well, such as weekly, monthly, and yearly. In fact the autocorrelation at lag 168 is more significant than previous significant autocorrelations indicating weekly seasonality effect.
+
+## METHOD A: FORECASTING WITH TIME SERIES ANALYSIS
+
+### Decomposing at Hourly Level
+
+```{r,warning = F, message = F}
+data[,mcp_ts:=ts(mcp_dollars, freq=24)]
+decomposed=data[,decompose(mcp_ts)]
+plot(decomposed)
+```
+
+The trend curve is not smooth at all. It probably shows noises along with the general trend. Since the data is large seasonality effect is not easily seen. We can look at it more closely.
+
+```{r,warning = F, message = F}
+ts.plot(decomposed$figure, xlab="Hour of the Day", ylab="Mean Effect", main="Daily Seasonality Effect")
+```
+
+MCP is lower in the mornings (around 5 am) and higher in noon and evening. It decreases at nights again.
+
+```{r,warning = F, message = F}
+acf(decomposed$random, na.action = na.pass, lag.max = 170, main="The ACF of the Random Component")
+```
+
+There are still significant autocorrelation in the series.
+
+### Decomposing at Daily Level
+
+```{r, warning = F, message = F}
+daily = data[, list(mcp=mean(mcp_dollars)), by=list(time=as.Date(time))]
+trend = filter(daily[,mcp], sides = 2, filter = rep(1/7, 7))
+daily = data.table(daily, trend)
+```
+
+Visually we have,
+
+```{r, warning = F, message = F}
+ggplot(daily, aes(x = time)) +
+  geom_line(aes(y=mcp, col="daily mcp")) +
+  geom_line(aes(y=trend, col="trend-cycle")) +
+  labs(title="Daily MCP and Trend-Cycle Component",
+       x="Time",
+       y="MCP") 
+```
+
+The curve smooths the series better now, as expected. Now we can detrend the data and see the weekly seasonality effect.
+
+```{r, warning = F, message = F}
+daily[,detrended:=mcp-trend]
+daily[,seasonal:=mean(detrended, na.rm = TRUE), by=list(wday(time))]
+```
+
+```{r, warning = F, message = F}
+ggplot(daily[1:7], aes(x=time, y=seasonal)) + 
+  geom_line() +
+  labs(title="Weekly Seasonality Effect",
+       x="Time",
+       y="Mean Effect")   
+```
+
+We see that prices are stable over the weekdays and are decreasing at the weekend, especially on Sunday.
+
+```{r,warning = F, message = F,  fig.show="hold", out.width="50%"}
+daily[,random:=detrended-seasonal]
+acf(daily[,random], na.action = na.pass, lag.max = 170, main="The ACF of the Random Component")
+pacf(daily[,random], na.action = na.pass, lag.max = 170, main="The ACF of the Random Component")
+
+```
+
+The ACF improved somehow. There is only a few significant spikes.
+
+### Decomposing at Weekly Level
+
+The ACF of the daily decomposition is enough. Nevertheless, we can check other decomposition levels.
+
+The weekly aggregation is not easy since every month has different number of weeks. If we assume there are 4 weeks in each month, we can have the effect of each week even if they are approximated numbers. Note that since the implementation of this decomposition is easier with decompose() function, we can use it instead of the previous method.
+
+```{r,warning = F, message = F}
+data[,mcp_ts:=ts(mcp_dollars, freq=24*7*4)]  #24 hours/day -> 7 days/week -> 4 weeks/month
+decomposed=data[,decompose(mcp_ts)]
+plot(decomposed)
+```
+
+The trend curve smooths better. Since the data is large seasonality effect is not easily seen. We can look at it more closely.
+
+```{r,warning = F, message = F}
+seas=data.table(seas=decomposed$figure, t=1:672)
+seas[,week:=floor(1+t/168)]
+seas=seas[,.(mcp=mean(seas)), by=.(week=week)]
+seas=seas[-5]
+plot(seas, type="l")
+```
+
+It does not seem meaningful to decompose the series at weekly level. Mean effects are small anyways. Note that this is an approximation, the effects are not exact.
+
+
+### Decomposing at Monthly Level
+
+For decomposing the series at monthly level, we need daily mean consumption because we want to see the mean effect of each month. We need to manipulate the data to achieve this.
+
+```{r, warning = F, message = F}
+monthly = daily[, list(mcp=mean(mcp, na.rm=TRUE)), by=list(month(time), year(time))]
+months<-c("01","02","03","04","05","06","07","08","09","10","11","12")  
+monthly[, month := months[month]]
+monthly[, dummy_day := "01"]
+monthly[, time := as.Date(paste(year, month, dummy_day), format = "%Y %m %d")]
+monthly[, c("month", "year", "dummy_day"):=NULL]
+trend = filter(monthly[, mcp], sides = 2, filter = rep(1/12,12))
+monthly = data.table(monthly, trend)
+```
+
+Now we have trend-cycle component and we can plot it.
+
+```{r, warning = F, message = F}
+ggplot(monthly, aes(x = time)) +
+  geom_line(aes(y=mcp, col="monthly mcp")) +
+  geom_line(aes(y=trend, col="trend-cycle")) +
+  labs(title="Monthly MCP and Trend-Cycle Component",
+       x="Time",
+       y="MCP") 
+```
+
+The level of smoothness is increased further. It only shows a general trend.
+
+The following plot shows the seasonality effect.
+
+```{r, warning = F, message = F}
+monthly[,detrended:=mcp-trend]
+monthly[,seasonal:=mean(detrended, na.rm = TRUE), by=list(month(time))]
+```
+
+```{r, warning = F, message = F}
+ggplot(monthly[1:12], aes(x=time, y=seasonal)) + geom_line() +
+  labs(title="Yearly Seasonality Effect",
+       x="Time",
+       y="Mean Effect") 
+```
+
+We see that in the summer and the winter, prices are higher than those in the spring and the fall.
+
+### Fitting a Model
+
+Since the random component of the daily decomposition provides adequate ACF, we can move on with that decomposition.
+
+From now on, we try to make forecasts for a specified time period. Therefore, the data is separated into test and training sets.
+
+```{r,warning = F, message = F}
+train=data[time<"2021-05-22 00:00"]
+test=data[time>="2021-05-22 00:00"]
+```
+
+
+```{r, warning = F, message = F}
+trend = filter(train[,mcp_dollars], sides = 2, filter = rep(1/168, 168))
+train = data.table(train, trend)
+```
+
+There are several NAs in trend variable both in the head and in the tail of the data. Later, when we try to forecast the data, we will need trend values for all data points. In order to fill them, we can use `auto.arima()`. The order of the trend model is not important, so we only make forecast and skip this part instead of analyzing it.
+
+
+```{r, warning = F, message = F}
+trend = train[!is.na(trend),trend]
+trend = ts(trend, freq = 1)
+m = auto.arima(trend, seasonal = F, stepwise = F, approx = F)
+trend_forecast = forecast(m, h = 828)
+trend_train = trend_forecast$mean[1:84]
+trend_test = trend_forecast$mean[85:828]
+train[(.N-83):.N, trend:=trend_train]
+test[,trend:=trend_test]
+```
+
+We can now detrend the series in order to obtain seasonality effects. The following plot shows the seasonality effects of each individual season. Recall that the frequency is 168.
+
+```{r, warning = F, message = F}
+train[, detrended:=mcp_dollars-trend]
+train[, seasonal:=mean(detrended, na.rm = TRUE), by=list(wday(time),hour(time))]
+```
+
+```{r, warning = F, message = F}
+ggplot(train[1:168], aes(x=time, y=seasonal)) + geom_line() +
+  labs(title="Weekly and Daily Seasonality Effect",
+       x="Time",
+       y="Mean Effect") 
+```
+
+Now we can obtain the random component and visually check it.
+
+```{r, warning = F, message = F}
+train[, random:=detrended-seasonal]
+```
+
+```{r, warning = F, message = F}
+ggplot(train, aes(x=time, y=random)) + geom_line() +
+  labs(title="Random Component",
+       x="Time",
+       y="MCP") 
+```
+
+Since we try to model the random component, we have to check its characteristics. We check its stationarity and then the ACF and the PACF.
+
+```{r,warning = F, message = F}
+summary(ur.kpss(train[,random]))
+```
+
+The unit root test suggests that the random component is non stationary.
+
+```{r,warning = F, message = F,  fig.show="hold", out.width="50%"}
+acf(train[,random], na.action = na.pass, lag.max = 170, main="The ACF of the Random Component")
+pacf(train[,random], na.action = na.pass, lag.max = 170, main="The ACF of the Random Component")
+```
+
+There is still significant autocorrelation at lag 24. We can take a seasonal difference and move on hoping that the seasonality effect vanishes because fitting a SARIMA model is too time consuming. 
+
+```{r,warning = F, message = F}
+train[,random_lag24:=shift(random,24)]
+train[,diff_random:=random-random_lag24]
+m1 = auto.arima(train[,diff_random], seasonal=F, stepwise=F, approx=F)
+m1
+checkresiduals(m1)
+```
+
+Order of the ARIMA fitted to seasonal differenced random component is (1,0,2). Residuals look fine except a sifnificant spike at lag 24. But at this point there is nothing to do to fix it.
+
+## METHOD B: FORECASTING WITH REGRESSION
+
+Since we are going to use hour and the day for seasonality, we can add those to the data. This time we can also add month information since implementation is easy since we will fit linear models.
+
+Note that we don't need to use trend as a regressor because visually we can say that there is no linear relationship as we see earlier in the plot.
+
+```{r,warning = F, message = F}
+train[,hour:=hour(time)]
+test[,hour:=hour(time)]
+train[,wday:=wday(time)]
+test[,wday:=wday(time)]
+train[,mon:=month(time)]
+test[,mon:=month(time)]
+
+```
+
+We will add some regressors but we cannot use all of the variables. Some of them have flaws. For example, `biomass`, `naphta`, and `fuel_oil` are remain unchanged over time. They cannot explain MCP. We cannot use `other` either because we do not know what it is exactly. Therefore, using individual regressors may not be convenient. We may use another strategy.
+
+First, we can add the total electricity production by renewable energy sources. Since we use the previous day's observation to make a forecast, we need lagged variables.
+
+```{r,warning = F, message = F}
+train[,renewable:=geothermal+dam+naphta+biomass+river]
+test[,renewable:=geothermal+dam+naphta+biomass+river]
+train[,lag_renewable:=shift(renewable,2)]
+test[,lag_renewable:=shift(renewable,2)]
+```
+
+Now, let's try to fit a linear model.
+
+```{r,warning = F, message = F}
+m2_1=lm(mcp_dollars~lag_renewable+hour+wday+mon, data=train)
+summary(m2_1)
+```
+
+Only the seasonality related variables are signficant and R-squared value is too small. We can try adding another regressor. We can add the ratio of the production by renewable energy sources to the total production.
+
+```{r,warning = F, message = F}
+train[,ratio:=renewable/total_prod]
+test[,ratio:=renewable/total_prod]
+train[,lag_ratio:=shift(ratio,2)]
+test[,lag_ratio:=shift(ratio,2)]
+m2_2=lm(mcp_dollars~lag_ratio+hour+wday+mon, data=train)
+summary(m2_2)
+checkresiduals(m2_2)
+```
+
+R-sqaured value increased significantly and anova() suggests that the second model is significantly different than the first one. But residuals are not adequate. We have to use lagged MCP in order to vanish the seasonality effect.
+
+```{r,warning = F, message = F}
+train[,lag_mcp:=shift(mcp_dollars,2)]
+test[,lag_mcp:=shift(mcp_dollars,2)]
+train[,lag24_mcp:=shift(mcp_dollars,24)]
+test[,lag24_mcp:=shift(mcp_dollars,24)]
+m2_3=lm(mcp_dollars~lag_mcp+lag24_mcp+lag_ratio+hour+wday+mon, data=train)
+summary(m2_3)
+checkresiduals(m2_3)
+```
+
+Residuals seem adequate now. At this point, we have two models. One of them is ARIMA model fitted to random component of decomposition, and the second one is the linear model. We have to select the best one.
+
+## SELECTING THE BEST MODEL
+
+We have to define a function. Note that this function is from the lectures.
+
+```{r,warning = F, message = F}
+accu=function(actual,forecast, method){
+  n=length(actual)
+  error=actual-forecast
+  mean=mean(actual)
+  sd=sd(actual)
+  CV=sd/mean
+  FBias=sum(error)/sum(actual)
+  MAPE=sum(abs(error/actual))/n
+  RMSE=sqrt(sum(error^2)/n)
+  MAD=sum(abs(error))/n
+  MADP=sum(abs(error))/sum(abs(actual))
+  WMAPE=MAD/mean
+  l=data.frame(method,n,mean,sd,CV,FBias,MAPE,RMSE,MAD,MADP,WMAPE)
+  return(l)
+}
+```
+
+Now we can define a test period and compare two models.
+
+```{r,warning = F, message = F}
+train_compare=train[time<"2021-04-21 23:00:00"]
+test_compare=train[time>="2021-04-21 23:00:00"]
+train_compare[,diff_random:=ts(diff_random,1)]
+
+m1 = arima(train_compare[,diff_random], order=c(1,0,2))
+m2 = lm(mcp_dollars~lag_mcp+lag24_mcp+lag_ratio+hour+wday+mon, data=train_compare)
+
+arima_pred = forecast(m1, h=nrow(test_compare))
+lm_pred = predict(m2, newdata=test_compare)
+
+test_compare[,arima:=as.numeric(arima_pred$mean)+as.numeric(random_lag24)+
+               as.numeric(trend)+as.numeric(seasonal)]
+test_compare[,lm:=lm_pred]
+```
+
+Now we can compare two model using the function defined previously.
+
+```{r,warning = F, message = F}
+
+test_compare[,rbind(accu(mcp_dollars,arima,"arima"),accu(mcp_dollars,lm,"lm"))]
+```
+
+
+We see that linear regression provides better results. Therefore, we can use it to make forecasts for the period between 2021-05-22 and 2021-06-21. First we need to define necessary variables.
+
+```{r,warning = F, message = F}
+
+model=lm(mcp_dollars~lag_mcp+lag24_mcp+lag_ratio+hour+wday+mon, data=train)
+test[1:2, lag_mcp:=train[(.N-1):.N, mcp_dollars]]
+test[1:2, lag_ratio:=train[(.N-1):.N, ratio]]
+test[1:24,lag24_mcp:=train[(.N-23):.N,mcp_dollars]]
+test[,pred:=predict(model,newdata=test)]
+```
+
+We can plot the forecasted values.
+
+```{r,warning = F, message = F}
+ggplot(test, aes(x=time)) +
+  geom_line(aes(y=mcp_dollars, col="actual")) +
+  geom_line(aes(y=pred, col="predicted")) 
+```
+
+```{r,warning = F, message = F}
+test[,accu(mcp_dollars,pred,"lm")]
+```
+
+
+# CONCLUSION
+
+In conclusion, we first tried to understand the characteristics of the series by decomposing at different levels. Then we tried to fit a model on random component of the decomposition at frequency of 168. The linear regression method, however, provides better results therefore it is used to make forecasts. The final model performs good enough on the test data as it seen in the above performance measures.

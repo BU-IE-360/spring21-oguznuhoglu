@@ -11,3 +11,6 @@
 
 ## Homework 3
 [Here](files/hw3/hw3.html) is my time series forecasting study.
+
+## Final Exam
+[Here](files/final/final.html) is my solution to the final exam.
