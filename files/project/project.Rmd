@@ -1,0 +1,1238 @@
+---
+title: "Term Project Report"
+author: Osman Oguz Nuhoglu, Beste Yildiz Yilmaz, Efe Ahmet Guden - IE360 - Spring
+  2021
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+require(jsonlite)
+require(httr)
+require(data.table)
+library(urca)
+library(forecast)
+library(ggplot2)
+library(astsa)
+library(GGally)
+library(datetime)
+library(lubridate)
+```
+
+## Introduction 
+
+Forecasting the future sales is an important issue in e-commerce. Accurate forecasts help firms to keep appropriate levels of inventory. If forecasts are inaccurate, the firm may face high inventory levels or stock outs. This will lead to carrying costs or lost sales. Another benefit of accurate forecasts is predicting the future revenues of the firms. This may help firms to better adjust their financial situations.
+In this project, number of sales of several products which are sold on [Trendyol](https://www.trendyol.com/) are tried to be forecasted with several time series forecasting methods.
+
+## Related Literature 
+
+In Spring 2020, Ekin Karamalak, Elif Bayazit, Anil Baran Dogan, Yusuf Ozdemir, Esranur Tinaz (Group 11) considered day of the week for building linear models for the same project. Their approach is used in this study as well.
+In addition to this, several theoretical concepts are studied from [Time Series Analysis and Its Applications With R Examples - 4th Edition - Shumway, Stoffer](https://www.stat.pitt.edu/stoffer/tsa4/tsa4.pdf).
+
+## Data Manipulation
+
+There are two data sources. `data1` and `data2` are imported and they need to be matched in terms of variables. The following chunk of code does the trick. `data1` is from the excel file without updates. Therefore some of the variables should be removed from `data2`. Then they are joined. Note that we use the data up to 2020-06-10 on which we build the models. For convenience we use the data up to the same date.
+
+```{r data2: data API, echo=FALSE}
+get_token <- function(username, password, url_site){
+  
+  post_body = list(username=username,password=password)
+  post_url_string = paste0(url_site,'/token/')
+  result = POST(post_url_string, body = post_body)
+  
+  # error handling (wrong credentials)
+  if(result$status_code==400){
+    print('Check your credentials')
+    return(0)
+  }
+  else if (result$status_code==201){
+    output = content(result)
+    token = output$key
+  }
+  
+  return(token)
+}
+
+get_data <- function(start_date='2020-03-20', token, url_site){
+  
+  post_body = list(start_date=start_date,username=username,password=password)
+  post_url_string = paste0(url_site,'/dataset/')
+  
+  header = add_headers(c(Authorization=paste('Token',token,sep=' ')))
+  result = GET(post_url_string, header, body = post_body)
+  output = content(result)
+  data = data.table::rbindlist(output)
+  data[,event_date:=as.Date(event_date)]
+  data = data[order(product_content_id,event_date)]
+  return(data)
+}
+subm_url = 'http://46.101.163.177'
+u_name = "Group1"
+p_word = "xja3s47rmKxxoZ81"
+submit_now = FALSE
+
+username = u_name
+password = p_word
+
+token = get_token(username=u_name, password=p_word, url=subm_url)
+data2 = get_data(token=token,url=subm_url)
+```
+
+
+```{r data1: excel data, echo=FALSE}
+data1 = fread("ProjectRawData.csv", header=T)
+```
+
+
+```{r}
+data1[,price:=round(price,2)]
+data1[,event_date:=as.Date(event_date, format = "%d/%m/%Y")]
+data1 = data1[order(event_date, decreasing = FALSE)]
+
+data2 = data2[event_date<"2021-06-10"]
+data2[,c("ty_visits", "category_basket", "category_favored"):=NULL]
+data = rbind(data1, data2, fill = TRUE)
+```
+
+
+## Methodology
+
+There are many variables which can be used to create a model. But some of those variables cannot be used due to several reasons. Before getting them, it may be better to explain why a model should contain those variables. In other words, what should be caught in these series? Well, a typical time series contains seasonality effect which is not the case now but discussed in more detail later. Other than that, a typical time series contains trend-cycle component which can be easily modeled by differencing the series. Remaining part of the series is so-called random component, but typically it may depend on some variables. This is where the external variables enter the equation. Note that the time series decomposition is not used in this study, nevertheless it is important to understand the characteristics of a time series. 
+
+Available external variables are `price`, `visit_count`, `favored_count`, `basket_count`, `category_sold`, `category_brand_sold`, `category_visits`. Two variables are added along with those. One of them is `wday` indicating the day of the week, and the other is `special` indicating whether a day is a special day such as Black Friday or not.
+
+For example, there was a special discounts for most of the products between 2020-11-25 and 2020-11-29 due to Black Friday. 
+
+```{r}
+data[, wday:=wday(event_date)]
+
+
+specialdays=c(seq(as.Date("2020-11-09"),as.Date("2020-11-10"),by=1), #9-11 kasım indirimi
+              seq(as.Date("2020-11-25"),as.Date("2020-11-29"),by=1), #black friday
+              seq(as.Date("2020-06-18"),as.Date("2020-06-20"),by=1), #haziran en uzun gün fırsatları
+              seq(as.Date("2020-09-10"),as.Date("2020-09-12"),by=1), #mega eylül
+              seq(as.Date("2020-10-06"),as.Date("2020-10-08"),by=1), #büyük ekim
+              seq(as.Date("2020-12-21"),as.Date("2020-12-23"),by=1))
+data[,special:=0]
+for(i in specialdays){
+  data[event_date==i,special:=1]
+}
+```
+
+Other than the special days and discounts, demand may be assumed as a random process. Since a variable indicating special days is available, it is now important to detect a discount for a specific product.
+
+Among those variables `price` cannot be used because it is not randomly determined and cannot be forecasted. Use of lagged variable cannot be used either, because the price of the previous days most probably does not affect the sales today. `visit_count`, `favored_count`, `category_sold`, `category_brand_sold`, and `category_visits` are not reliable because some of them are only available for a specific time period and others are not stable over time. There are only `basket_count`, `wday`, and `special` left. Those three variables will be used for each product. Lagged `basket_count` will be used instead of `basket_count` because if lagged variables will not be used, then they have to be forecasted. But this arises the same problem. The data cannot be modeled properly, because the discount times for specific products are unknown. Lagged `basket_count` variable can be used for this purpose since people add the items to the basket when they know there will be a discount the next day. Even if they do not know, if they add the item to their basket and do not buy it yet, they can be buy it when there is a discount.
+
+For each product, three models will be compared and the best model will be used to make a forecast. First model will be an ARIMA model fitted to differenced and log transformed `sold_count`. The second model is simply an ARIMAX model, but implemented in a different way because of an error throwed by `forecast()` function. An ARIMA model will be fit to the residuals of a linear model fitted to differenced and log transformed `sold_count`. And the last model is an ARIMA model which is fitted to the differenced residuals of a linear model fitted to `sold_count`. 
+
+Since ARIMAX models are implemented in a different way, making forecasts may be hard to understand. The detailed explanation can be found in Appendix.
+
+We deal with products separately. Also we define a 2x9 matrix in order to keep the forecasted values and IDs of the products.
+
+```{r}
+data_1 = data[product_content_id==48740784] #coat
+data_2 = data[product_content_id==73318567] #bikini top 1
+data_3 = data[product_content_id==32737302] #bikini top 2
+data_4 = data[product_content_id==31515569] #tight
+data_5 = data[product_content_id==6676673]  #headphones
+data_6 = data[product_content_id==7061886]  #vacuum cleaner
+data_7 = data[product_content_id==85004]    #face cleanser
+data_8 = data[product_content_id==4066298]  #baby wipe
+data_9 = data[product_content_id==32939029] #electric toothbrush
+
+fcst = matrix(nrow=2,ncol=9)
+fcst[2,1]=48740784
+fcst[2,2]=73318567
+fcst[2,3]=32737302
+fcst[2,4]=31515569
+fcst[2,5]=6676673
+fcst[2,6]=7061886
+fcst[2,7]=85004
+fcst[2,8]=4066298
+fcst[2,9]=32939029
+```
+
+## Function Definitions
+
+Throughout the study, we will be using two functions. We define them here. Note that these functions are from the lectures. The first one is to build models and make forecasts conveniently. The second one is for comparing different models.
+
+```{r}
+forecast_with_arima=function(data,forecast_ahead,target_name='sold_count',
+                             is_seasonal=F,is_stepwise=F,is_trace=T,is_approx=F){
+  command_string=sprintf('input_series=data$%s',target_name)
+  eval(parse(text=command_string))
+  
+  fitted=auto.arima(input_series,seasonal=is_seasonal,
+                    trace=is_trace,stepwise=is_stepwise,approximation=is_approx)
+  
+  forecasted=forecast(fitted,h=forecast_ahead)
+  return(list(forecast=as.numeric(forecasted$mean),model=fitted))
+}
+
+accu=function(actual,forecast){
+  n=length(actual)
+  error=actual-forecast
+  mean=mean(actual)
+  sd=sd(actual)
+  CV=sd/mean
+  FBias=sum(error)/sum(actual)
+  MAPE=sum(abs(error/actual))/n
+  RMSE=sqrt(sum(error^2)/n)
+  MAD=sum(abs(error))/n
+  MADP=sum(abs(error))/sum(abs(actual))
+  WMAPE=MAD/mean
+  l=data.frame(n,mean,sd,CV,FBias,MAPE,RMSE,MAD,MADP,WMAPE)
+  return(l)
+}
+```
+
+## Building Models
+
+### Product 1
+
+```{r, warning=F, message=F}
+ggplot(data_1, aes(x=event_date, y=sold_count)) + geom_line() + labs(title = "coat")
+```
+
+There were probably some stockout problems. Note that this product can be highly affected by seasons. There is no need to use the data between Oct 2020 and Nov 2020 because that period represents another season. 
+
+```{r, warning=F, message=F}
+data_1 = data_1[event_date>="2021-05-09"]
+ggplot(data_1, aes(x=event_date, y=sold_count)) + geom_line() + labs(title = "coat")
+```
+
+Now the data is very limited. There is no need to transform the series.
+
+```{r, warning=F, message=F}
+summary(ur.kpss(data_1[,sold_count])) 
+acf2(data_1[,sold_count]) 
+```
+
+Unit root test suggests that the time series is stationary and both ACF and PACF suggest that there is not dependency.
+
+```{r, warning=F, message=F}
+data_1[,lag2_basket_count:=shift(basket_count,2)]
+lm_1 = lm(sold_count~lag2_basket_count+special+as.factor(wday), data_1)
+anova(lm_1)
+```
+
+There is no important relationship between the time series and variables.
+
+As ACF and PACF suggest, the time series is random. Therefore, it is not an ARIMA process. It looks like white noise series. 
+
+```{r, warning=F, message=F}
+hist(data_1[,sold_count])
+```
+
+Above histogram suggests that this is not a Gaussian white noise. In order to make a forecast, the median of the time series can be used.
+
+```{r, warning=F, message=F}
+fcst[1,1]=median(data_1[,sold_count])
+```
+
+### Product 2 
+
+```{r, warning=F, message=F}
+ggplot(data_2, aes(x=event_date, y=sold_count)) + geom_line() + labs(title = "bikini top 1")  
+```
+
+The data does not seem to be reliable until 2021-05-01, probably because of stockouts or production related problems. Therefore, only the last part of the time series will be used.
+
+```{r, warning=F, message=F}
+data_2 = data_2[event_date>="2021-04-28"]
+ggplot(data_2, aes(x=event_date, y=sold_count)) + geom_line() + labs(title = "bikini top 1")
+acf2(data_2[,sold_count])
+```
+
+
+According to ACF and PACF, there is not seasonality effect. Since there are not many observations, Box-Cox transformation is not essential. It can be skipped.
+
+```{r, warning=F, message=F}
+summary(ur.kpss(data_2[,sold_count]))
+```
+
+Unit root test suggests that the time series is stationary. Recalling ACF and PACF, the time series looks like a typical AR(1) process.
+
+At this point, a linear model can be fitted to the time series.
+
+```{r, warning=F, message=F}
+data_2[,lag2_basket_count:=shift(basket_count,2)]
+lm_2 = lm(sold_count~lag2_basket_count+special+as.factor(wday), data_2)
+anova(lm_2)
+```
+
+Note that `special` variable is not shown in the `anova()` table because it is all zero after 2021-02-20. The only important variable is `lag2_basket_count`.
+
+```{r, warning=F, message=F}
+lm_2 = lm(sold_count~lag2_basket_count, data_2)
+summary(lm_2)
+data_2[,res:=c(rep(NA,2),residuals(lm_2))]
+summary(ur.kpss(data_2[,res]))
+```
+
+Test-statistic is small enough, thus differencing is not needed.
+
+At this point, two models will be compared. We also define test periods in the following chunk. This algorithm is for comparing different models and is from the lectures.
+
+```{r, warning=F, message=F}
+forecast_ahead=2
+train_start=as.Date('2020-05-25')
+test_start=as.Date('2021-05-20')
+test_end=as.Date('2021-06-09')
+test_dates=seq(test_start,test_end,by='day')
+```
+
+```{r}
+results=vector('list',length(test_dates))
+for(i in 1:length(test_dates)){
+  current_date=test_dates[i]-forecast_ahead
+  
+  past_data=data_2[event_date<=current_date]
+  forecast_data=data_2[event_date==test_dates[i]]
+  
+  # arima model
+  frcst=forecast_with_arima(past_data, forecast_ahead, target_name = "sold_count", is_trace = F)
+  forecast_data[,arima_prediction:=round(frcst$forecast[2],
+                                         0)]
+  
+  # arimax model (not exactly arimax)
+  frcst=forecast_with_arima(past_data, forecast_ahead, target_name = "res", is_trace = F)  
+  reg = data.frame(lag2_basket_count=past_data[.N,lag2_basket_count])
+  forecast_data[,arimax_prediction:=round(frcst$forecast[2]+
+                                          predict(lm_2,reg),
+                                          0)]
+  results[[i]]=forecast_data
+}
+overall_results=rbindlist(results)
+melted_result_2=melt(overall_results,c('event_date','sold_count'),
+                     c('arima_prediction','arimax_prediction'))
+performance_2= melted_result_2[,accu(sold_count,value),by=list(variable)]        
+performance_2
+```
+
+The first model is better and it will be used to make forecasts.
+
+```{r, warning=F, message=F}
+model_2=forecast_with_arima(data_2,forecast_ahead = 2, target_name = "sold_count")
+checkresiduals(model_2$model) 
+fcst[1,2] = round(model_2$forecast[2], 0)
+```
+
+Regarding the available information, the model seems to be adequate in terms of its residuals. Also note that the model fitted is AR(1).
+
+
+### Product 3
+
+```{r, warning=F, message=F}
+ggplot(data_3, aes(x=event_date, y=sold_count)) + geom_line() + labs(title = "bikini top 2")  
+```
+
+The data is not reliable until 2021-02-20, probably because of stockouts or production related problems.
+
+```{r, warning=F, message=F}
+data_3 = data_3[event_date>="2021-02-20"]
+ggplot(data_3, aes(x=event_date, y=sold_count)) + geom_line() + labs(title = "bikini top 2")
+acf2(data_3[,sold_count])
+```
+
+According to ACF and PACF, there is not seasonality effect. Since there are not many observations, Box-Cox transformation is not essential. It can be skipped.
+
+```{r, warning=F, message=F}
+summary(ur.kpss(data_3[,sold_count]))
+```
+
+The data does not seem to be stationary as the unit root test suggests. 
+
+```{r, warning=F, message=F}
+data_3[,lag_sold_count:=shift(sold_count,1)]
+data_3[,d_sold_count:=sold_count-lag_sold_count]
+summary(ur.kpss(data_3[,d_sold_count]))
+```
+
+Now, stationarity can be assumed. At this point, a linear model can be fitted to the series. In order to use `basket_count`, it should be differenced as well. Also note the use of lagged differenced `basket_count`, since forecast for 2 periods ahead is needed.
+
+```{r, warning=F, message=F}
+data_3[,lag_basket_count:=shift(basket_count,1)]
+data_3[,diff_basket_count:=basket_count-lag_basket_count]
+data_3[,lag2_basket_count:=shift(basket_count,2)]
+data_3[,lag2_diff_basket_count:=shift(diff_basket_count,2)]
+lm_3_1 = lm(d_sold_count~lag2_diff_basket_count+special+as.factor(wday), data_3)
+anova(lm_3_1)
+```
+
+Note that `special` variable is not shown in the `anova()` table because it is all zero after 2021-02-20. 
+
+None of the variables is important.
+
+So far, a linear model is tried to be fitted to differenced series. Now, as another modeling strategy, the original series is tried to be modeled linearly.
+
+```{r, warning=F, message=F}
+lm_3_2 = lm(sold_count~as.factor(wday)+lag2_basket_count, data_3)
+anova(lm_3_2)
+```
+
+If only the important variable is used,
+
+```{r, warning=F, message=F}
+lm_3_2 = lm(sold_count~lag2_basket_count, data_3)
+summary(lm_3_2)
+data_3[,res:=c(rep(NA,2),residuals(lm_3_2))]
+summary(ur.kpss(data_3[,res])) 
+```
+
+Test-statistic is large, thus differencing is needed.
+
+```{r, warning=F, message=F}
+data_3[,lag_res:=shift(res,1)]
+data_3[,d_res:=res-lag_res]
+summary(ur.kpss(data_3[,d_res]))
+```
+
+In order to compare the models,
+
+
+```{r, warning=F, message=F}
+results=vector('list',length(test_dates))
+for(i in 1:length(test_dates)){
+  current_date=test_dates[i]-forecast_ahead
+  
+  past_data=data_3[event_date<=current_date]
+  forecast_data=data_3[event_date==test_dates[i]]
+  
+  # arima model
+  frcst=forecast_with_arima(past_data, forecast_ahead, target_name = "d_sold_count", is_trace = F)
+  forecast_data[,arima_prediction:=round(frcst$forecast[2]+
+                                         frcst$forecast[1]+
+                                         past_data[.N,c(sold_count)],
+                                         0)]
+  
+  # arimax model (special)(not exactly arimax)
+  frcst=forecast_with_arima(past_data, forecast_ahead, target_name = "d_res", is_trace = F)  
+  reg = data.frame(lag2_basket_count=past_data[.N,lag2_basket_count])
+  forecast_data[,arimax_prediction:=round(frcst$forecast[2]+
+                                          frcst$forecast[1]+
+                                          predict(lm_3_2,reg)+
+                                          past_data[.N,res],
+                                          0)]
+  
+  results[[i]]=forecast_data
+}
+overall_results=rbindlist(results)
+melted_result_3=melt(overall_results,c('event_date','sold_count'),
+                     c('arima_prediction','arimax_prediction'))
+performance_3= melted_result_3[,accu(sold_count,value),by=list(variable)]        
+performance_3
+```
+
+The second model is better.
+
+```{r, warning=F, message=F}
+model_3=forecast_with_arima(data_3,forecast_ahead = 2, target_name = "d_res")
+checkresiduals(model_3$model) 
+reg = data.frame(lag2_basket_count=data_3[.N,lag2_basket_count])
+fcst[1,3] = round(model_3$forecast[2]+
+                  model_3$forecast[1]+
+                  predict(lm_3_2,reg)+
+                  data_3[.N,c(res)],
+                  0)
+```
+
+Regarding the available information, the model seems to be adequate in terms of its residuals.
+
+### Product 4
+
+```{r, warning=F, message=F}
+ggplot(data_4, aes(x=event_date, y=sold_count)) + geom_line() + labs(title = "tight")
+acf2(data_4[,sold_count])
+```
+
+In ACF, there is a significant spike at lag 16 but this is not seasonality effect since the series is daily and lag 16 does not represent any seasonality effect. It may be transformed using Box-Cox transformation.
+
+```{r, warning=F, message=F}
+BoxCox.lambda(data_4[,sold_count], lower=0)
+```
+
+It is very close to zero, so a log transformation is appropriate.
+
+```{r, warning=F, message=F}
+data_4[,log_sold_count:=log(sold_count)]
+summary(ur.kpss(data_4[,log_sold_count]))
+```
+
+The data does not seem to be stationary as the unit root test suggests. 
+
+```{r, warning=F, message=F}
+data_4[,lag_log_sold_count:=shift(log_sold_count,1)]
+data_4[,dl_sold_count:=log_sold_count-lag_log_sold_count]
+summary(ur.kpss(data_4[,dl_sold_count]))
+```
+
+Now, stationarity can be assumed. At this point, a linear model can be fitted to the series. In order to use `basket_count`, it should be differenced as well. Also note the use of lagged differenced `basket_count`, since forecast for 2 periods ahead is needed.
+
+```{r, warning=F, message=F}
+data_4[,lag_basket_count:=shift(basket_count,1)]
+data_4[,diff_basket_count:=basket_count-lag_basket_count]
+data_4[,lag2_basket_count:=shift(basket_count,2)]
+data_4[,lag2_diff_basket_count:=shift(diff_basket_count,2)]
+lm_4_1 = lm(dl_sold_count~lag2_diff_basket_count+special+as.factor(wday), data_4)
+anova(lm_4_1)
+```
+
+Only `wday` variable seems to be important.
+
+```{r, warning=F, message=F}
+lm_4_1 = lm(dl_sold_count~as.factor(wday), data_4)
+summary(lm_4_1)
+data_4[,res_1:=c(NA,lm_4_1$residuals)]
+```
+
+So far, a linear model is fitted to differenced and transformed series. Now, as another modeling strategy, the original series is tried to be modeled linearly.
+
+```{r, warning=F, message=F}
+lm_4_2 = lm(sold_count~as.factor(special)+as.factor(wday)+lag2_basket_count, data_4)
+anova(lm_4_2)
+```
+
+If only the important variables to be used,
+
+```{r, warning=F, message=F}
+lm_4_2 = lm(sold_count~as.factor(special)+lag2_basket_count, data_4)
+summary(lm_4_2)
+data_4[,res_2:=c(rep(NA,2),residuals(lm_4_2))]
+summary(ur.kpss(data_4[,res_2])) 
+```
+
+Small test statistic suggests stationarity.
+
+In order to compare the models,
+
+
+```{r, warning=F, message=F}
+results=vector('list',length(test_dates))
+for(i in 1:length(test_dates)){
+  current_date=test_dates[i]-forecast_ahead
+  
+  past_data=data_4[event_date<=current_date]
+  forecast_data=data_4[event_date==test_dates[i]]
+  
+  # arima model
+  frcst=forecast_with_arima(past_data, forecast_ahead, target_name = "dl_sold_count", is_trace = F)
+  forecast_data[,arima_prediction:=round(exp(frcst$forecast[2]+
+                                             frcst$forecast[1]+
+                                             past_data[.N,c(log_sold_count)]),
+                                         0)]
+  # arimax model (wday)(not exactly arimax)
+  frcst=forecast_with_arima(past_data, forecast_ahead, target_name = "res_1", is_trace = F)  
+  reg1 = data.frame(wday=past_data[.N,ifelse(wday<7,wday+1,1)])
+  #past_data[.N,ifelse(wday<7,wday+1,1)])
+  #past_data[.N,ifelse(wday<6,wday+2,ifelse(wday==6,1,2))]
+  reg2 = data.frame(wday=past_data[.N,ifelse(wday<6,wday+2,ifelse(wday==6,1,2))])
+  forecast_data[,arimax_prediction_1:=round(exp(frcst$forecast[2]+
+                                              frcst$forecast[1]+
+                                              predict(lm_4_1,reg1)+
+                                              predict(lm_4_1,reg2)+
+                                              past_data[.N,c(log_sold_count)]),
+                                          0)]
+  
+  # arimax model (special)(not exactly arimax)
+  frcst=forecast_with_arima(past_data, forecast_ahead, target_name = "res_2", is_trace = F)  
+  reg = data.frame(special=as.factor(forecast_data[1,special]),lag2_basket_count=past_data[.N,lag2_basket_count])
+  forecast_data[,arimax_prediction_2:=round(frcst$forecast[2]+
+                                            predict(lm_4_2,reg),
+                                            0)]
+  
+  results[[i]]=forecast_data
+}
+overall_results=rbindlist(results)
+melted_result_4=melt(overall_results,c('event_date','sold_count'),
+                     c('arima_prediction','arimax_prediction_1','arimax_prediction_2'))
+performance_4= melted_result_4[,accu(sold_count,value),by=list(variable)]        
+performance_4
+```
+
+The second model is the best among these three.
+
+```{r, warning=F, message=F}
+model_4=forecast_with_arima(data_4,forecast_ahead = 2, target_name = "res_1")
+checkresiduals(model_4$model) 
+reg1 = data.frame(wday=data_4[.N,ifelse(wday<7,wday+1,1)])
+reg2 = data.frame(wday=data_4[.N,ifelse(wday<6,wday+2,ifelse(wday==6,1,2))])
+fcst[1,4] = round(exp(model_4$forecast[2]+
+                      model_4$forecast[1]+
+                      predict(lm_4_1,reg1)+
+                      predict(lm_4_1,reg2)+
+                      data_4[.N,c(log_sold_count)]),
+                  0)
+```
+
+Regarding the available information, the model seems to be adequate in terms of its residuals.
+
+### Product 5
+
+```{r, warning=F, message=F}
+ggplot(data_5, aes(x=event_date, y=sold_count)) + geom_line() + labs(title = "headphones")  
+acf2(data_5[,sold_count])
+```
+
+There is not seasonality effect either. It may be transformed using Box-Cox transformation.
+
+```{r, warning=F, message=F}
+BoxCox.lambda(data_5[,sold_count], lower=0)
+```
+
+It is very close to zero, so a log transformation is appropriate.
+
+```{r, warning=F, message=F}
+data_5[,log_sold_count:=log(sold_count)]
+summary(ur.kpss(data_5[,log_sold_count]))
+```
+
+The data does not seem to be stationary as the unit root test suggests. 
+
+```{r, warning=F, message=F}
+data_5[,lag_log_sold_count:=shift(log_sold_count,1)]
+data_5[,dl_sold_count:=log_sold_count-lag_log_sold_count]
+summary(ur.kpss(data_5[,dl_sold_count]))
+```
+
+Now, stationarity can be assumed. At this point, a linear model can be fitted to the series. In order to use `basket_count`, it should be differenced as well. Also note the use of lagged differenced `basket_count`, since forecast for 2 periods ahead is needed.
+
+```{r, warning=F, message=F}
+data_5[,lag_basket_count:=shift(basket_count,1)]
+data_5[,diff_basket_count:=basket_count-lag_basket_count]
+data_5[,lag2_basket_count:=shift(basket_count,2)]
+data_5[,lag2_diff_basket_count:=shift(diff_basket_count,2)]
+lm_5_1 = lm(dl_sold_count~lag2_diff_basket_count+special+as.factor(wday), data_5)
+anova(lm_5_1)
+```
+
+Those variables does not seem to be related with sales. Now, the original series is tried to be modeled linearly.
+
+```{r, warning=F, message=F}
+lm_5_2 = lm(sold_count~as.factor(special)+as.factor(wday)+lag2_basket_count, data_5)
+anova(lm_5_2)
+```
+
+If only the important variables to be used,
+
+```{r, warning=F, message=F}
+lm_5_2 = lm(sold_count~as.factor(special)+lag2_basket_count, data_5)
+summary(lm_5_2)
+```
+
+`special` variable does not seem to be effective. 
+
+
+```{r, warning=F, message=F}
+lm_5_2 = lm(sold_count~lag2_basket_count, data_5)
+summary(lm_5_2)
+data_5[,res:=c(rep(NA,2),residuals(lm_5_2))]
+summary(ur.kpss(data_5[,res])) 
+```
+
+Differencing can be performed since the value of test-statistic is somehow large.
+
+```{r, warning=F, message=F}
+data_5[,lag_res:=shift(res,1)]
+data_5[,d_res:=res-lag_res]
+summary(ur.kpss(data_5[,d_res])) 
+```
+
+Test statistic is small now, suggesting stationarity.
+
+In order to compare the models,
+
+
+```{r, warning=F, message=F}
+results=vector('list',length(test_dates))
+for(i in 1:length(test_dates)){
+  current_date=test_dates[i]-forecast_ahead
+  
+  past_data=data_5[event_date<=current_date]
+  forecast_data=data_5[event_date==test_dates[i]]
+  
+  # arima model
+  frcst=forecast_with_arima(past_data, forecast_ahead, target_name = "dl_sold_count", is_trace = F)
+  forecast_data[,arima_prediction:=round(exp(frcst$forecast[2]+
+                                             frcst$forecast[1]+
+                                             past_data[.N,c(log_sold_count)]),
+                                         0)]
+  
+  # arimax model (not exactly arimax)
+  frcst=forecast_with_arima(past_data, forecast_ahead, target_name = "d_res", is_trace = F)  
+  reg = data.frame(lag2_basket_count=past_data[.N,basket_count])
+  forecast_data[,arimax_prediction:=round(frcst$forecast[2]+
+                                          frcst$forecast[1]+  
+                                          predict(lm_5_2,reg)+
+                                          past_data[.N,res],
+                                          0)]
+  
+  results[[i]]=forecast_data
+}
+overall_results=rbindlist(results)
+melted_result_5=melt(overall_results,c('event_date','sold_count'),
+                     c('arima_prediction','arimax_prediction'))
+performance_5= melted_result_5[,accu(sold_count,value),by=list(variable)]        
+performance_5
+```
+
+The second model is better, it will be used to make forecasts.
+
+```{r, warning=F, message=F}
+model_5=forecast_with_arima(data_5,forecast_ahead = 2, target_name = "d_res")
+checkresiduals(model_5$model)
+reg = data.frame(lag2_basket_count=data_5[.N,basket_count])
+fcst[1,5] = round(model_5$forecast[2]+
+                model_5$forecast[1]+
+                predict(lm_5_2,reg)+
+                data_5[.N,c(res)],
+                0)
+```
+
+Regarding the available information, the model seems to be adequate in terms of its residuals.
+
+### Product 6
+
+```{r, warning=F, message=F}
+ggplot(data_6, aes(x=event_date, y=sold_count)) + geom_line() + labs(title = "vacuum cleaner") 
+acf2(data_6[,sold_count])
+```
+
+Same situation arises here. Lag 16 does not correspond to any seasonality. It may be transformed using Box-Cox transformation.
+
+```{r, warning=F, message=F}
+BoxCox.lambda(data_6[,sold_count], lower=0)
+```
+
+It is very close to zero, so a log transformation can be appropriate.
+
+```{r, warning=F, message=F}
+data_6[,log_sold_count:=log(sold_count)]
+summary(ur.kpss(data_6[,log_sold_count]))
+```
+
+The data does not seem to be stationary as the unit root test suggests. 
+
+```{r, warning=F, message=F}
+data_6[,lag_log_sold_count:=shift(log_sold_count,1)]
+data_6[,dl_sold_count:=log_sold_count-lag_log_sold_count]
+summary(ur.kpss(data_6[,dl_sold_count]))
+```
+
+Now, stationarity can be assumed. At this point, a linear model can be fitted to the series. In order to use `basket_count`, it should be differenced as well. Also note the use of lagged differenced `basket_count`, since forecast for 2 periods ahead is needed.
+
+```{r, warning=F, message=F}
+data_6[,lag_basket_count:=shift(basket_count,1)]
+data_6[,diff_basket_count:=basket_count-lag_basket_count]
+data_6[,lag2_basket_count:=shift(basket_count,2)]
+data_6[,lag2_diff_basket_count:=shift(diff_basket_count,2)]
+lm_6_1 = lm(dl_sold_count~lag2_diff_basket_count+special+as.factor(wday), data_6)
+anova(lm_6_1)
+```
+
+Only `wday` variable seems to be important.
+
+```{r, warning=F, message=F}
+lm_6_1 = lm(dl_sold_count~as.factor(wday), data_6)
+summary(lm_6_1)
+data_6[,res_1:=c(NA,lm_6_1$residuals)]
+```
+
+So far, a linear model is fitted to differenced and transformed series. Now, as another modeling strategy, the original series is tried to be modeled linearly.
+
+```{r, warning=F, message=F}
+lm_6_2 = lm(sold_count~as.factor(special)+as.factor(wday)+lag2_basket_count, data_6)
+anova(lm_6_2)
+```
+
+If only the important variables to be used,
+
+```{r, warning=F, message=F}
+lm_6_2 = lm(sold_count~as.factor(special)+lag2_basket_count, data_6)
+summary(lm_6_2)
+data_6[,res_2:=c(rep(NA,2),residuals(lm_6_2))]
+summary(ur.kpss(data_6[,res_2])) 
+```
+
+Test statistic is large and differencing is required.
+
+```{r, warning=F, message=F}
+data_6[,lag_res_2:=shift(res_2,1)]
+data_6[,d_res_2:=res_2-lag_res_2]
+summary(ur.kpss(data_6[,d_res_2])) 
+```
+
+
+In order to compare the models,
+
+
+```{r, warning=F, message=F}
+results=vector('list',length(test_dates))
+for(i in 1:length(test_dates)){
+  current_date=test_dates[i]-forecast_ahead
+  
+  past_data=data_6[event_date<=current_date]
+  forecast_data=data_6[event_date==test_dates[i]]
+  
+  # arima model
+  frcst=forecast_with_arima(past_data, forecast_ahead, target_name = "dl_sold_count", is_trace = F)
+  forecast_data[,arima_prediction:=round(exp(frcst$forecast[2]+
+                                             frcst$forecast[1]+
+                                             past_data[.N,c(log_sold_count)]),
+                                         0)]
+  # arimax model (wday)(not exactly arimax)
+  frcst=forecast_with_arima(past_data, forecast_ahead, target_name = "res_1", is_trace = F)  
+  reg1 = data.frame(wday=past_data[.N,ifelse(wday<7,wday+1,1)])
+  reg2 = data.frame(wday=past_data[.N,ifelse(wday<6,wday+2,ifelse(wday==6,1,2))])
+  forecast_data[,arimax_prediction_1:=round(exp(frcst$forecast[2]+
+                                                frcst$forecast[1]+
+                                                predict(lm_6_1,reg1)+
+                                                predict(lm_6_1,reg2)+
+                                                past_data[.N,c(log_sold_count)]),
+                                            0)]
+  
+  # arimax model (special)(not exactly arimax)
+  frcst=forecast_with_arima(past_data, forecast_ahead, target_name = "d_res_2", is_trace = F)  
+  reg = data.frame(special=as.factor(forecast_data[1,special]),
+                   lag2_basket_count=past_data[.N,lag2_basket_count])
+  forecast_data[,arimax_prediction_2:=round(frcst$forecast[2]+
+                                            frcst$forecast[1]+  
+                                            predict(lm_6_2,reg)+
+                                            past_data[.N,res_2],
+                                            0)]
+  
+  
+  results[[i]]=forecast_data
+}
+overall_results=rbindlist(results)
+melted_result_6=melt(overall_results,c('event_date','sold_count'),
+                     c('arima_prediction','arimax_prediction_1','arimax_prediction_2'))
+performance_6= melted_result_6[,accu(sold_count,value),by=list(variable)]        
+performance_6
+```
+
+The second model is the best among these three.
+
+```{r, warning=F, message=F}
+model_6=forecast_with_arima(data_6,forecast_ahead = 2, target_name = "res_1")
+checkresiduals(model_6$model) 
+reg1 = data.frame(wday=data_6[.N,ifelse(wday<7,wday+1,1)])
+reg2 = data.frame(wday=data_6[.N,ifelse(wday<6,wday+2,ifelse(wday==6,1,2))])
+fcst[1,6] = round(exp(model_6$forecast[2]+
+                    model_6$forecast[1]+
+                    predict(lm_6_1,reg1)+
+                    predict(lm_6_1,reg2)+
+                    data_6[.N,c(log_sold_count)]),
+                0)
+```
+
+Regarding the available information, the model seems to be adequate in terms of its residuals.
+
+### Product 7
+
+```{r, warning=F, message=F}
+ggplot(data_7, aes(x=event_date, y=sold_count)) + geom_line() + labs(title = "face cleanser")
+acf2(data_7[,sold_count])
+```
+
+There is not seasonality effect. It may be transformed using Box-Cox transformation.
+
+```{r, warning=F, message=F}
+BoxCox.lambda(data_7[,sold_count], lower=0)
+```
+
+It is very close to zero, so a log transformation is appropriate.
+
+```{r, warning=F, message=F}
+data_7[,log_sold_count:=log(sold_count)]
+summary(ur.kpss(data_7[,log_sold_count]))
+```
+
+The data does not seem to be stationary as the unit root test suggests. 
+
+```{r, warning=F, message=F}
+data_7[,lag_log_sold_count:=shift(log_sold_count,1)]
+data_7[,dl_sold_count:=log_sold_count-lag_log_sold_count]
+summary(ur.kpss(data_7[,dl_sold_count]))
+```
+
+Now, stationarity can be assumed. At this point, a linear model can be fitted to the series. In order to use `basket_count`, it should be differenced as well. Also note the use of lagged differenced `basket_count`, since forecast for 2 periods ahead is needed.
+
+```{r, warning=F, message=F}
+data_7[,lag_basket_count:=shift(basket_count,1)]
+data_7[,diff_basket_count:=basket_count-lag_basket_count]
+data_7[,lag2_basket_count:=shift(basket_count,2)]
+data_7[,lag2_diff_basket_count:=shift(diff_basket_count,2)]
+lm_7_1 = lm(dl_sold_count~lag2_diff_basket_count+special+as.factor(wday), data_7)
+anova(lm_7_1)
+```
+
+Only `wday` variable seems to be important but since it could not be explained intuitively, it is not used unless it is highly significant.
+
+Now, as another modeling strategy, the original series is tried to be modeled linearly.
+
+```{r, warning=F, message=F}
+lm_7_2 = lm(sold_count~as.factor(special)+as.factor(wday)+lag2_basket_count, data_7)
+anova(lm_7_2)
+```
+
+If only the important variables are used,
+
+```{r, warning=F, message=F}
+lm_7_2 = lm(sold_count~as.factor(special)+lag2_basket_count, data_7)
+summary(lm_7_2)
+data_7[,res:=c(rep(NA,2),residuals(lm_7_2))]
+summary(ur.kpss(data_7[,res])) 
+```
+
+Small test statistic suggests stationarity.
+
+In order to compare the models,
+
+
+```{r, warning=F, message=F}
+results=vector('list',length(test_dates))
+for(i in 1:length(test_dates)){
+  current_date=test_dates[i]-forecast_ahead
+  
+  past_data=data_7[event_date<=current_date]
+  forecast_data=data_7[event_date==test_dates[i]]
+  
+  # arima model
+  frcst=forecast_with_arima(past_data, forecast_ahead, target_name = "dl_sold_count", is_trace = F)
+  forecast_data[,arima_prediction:=round(exp(frcst$forecast[2]+
+                                             frcst$forecast[1]+
+                                             past_data[.N,c(log_sold_count)]),
+                                         0)]
+  
+  # arimax model (special+lag2_basket_count)(not exactly arimax)
+  frcst=forecast_with_arima(past_data, forecast_ahead, target_name = "res", is_trace = F)  
+  reg = data.frame(special=as.factor(forecast_data[1,special]),lag2_basket_count=past_data[.N,lag2_basket_count])
+  forecast_data[,arimax_prediction:=round(frcst$forecast[2]+
+                                            predict(lm_7_2,reg),
+                                            0)]
+  
+  results[[i]]=forecast_data
+}
+overall_results=rbindlist(results)
+melted_result_7=melt(overall_results,c('event_date','sold_count'),
+                     c('arima_prediction','arimax_prediction'))
+performance_7= melted_result_7[,accu(sold_count,value),by=list(variable)]        
+performance_7
+```
+
+The first model is better but note that the accuracy measures are higher than before.
+
+```{r, warning=F, message=F}
+model_7=forecast_with_arima(data_7, forecast_ahead = 2, target_name = "dl_sold_count")
+checkresiduals(model_7$model) 
+fcst[1,7] = round(exp(model_7$forecast[2]+
+                    model_7$forecast[1]+
+                    data_7[.N,c(log_sold_count)]),
+                0)
+```
+
+Regarding the available information, the model seems to be adequate in terms of its residuals.
+
+### Product 8
+
+```{r, warning=F, message=F}
+ggplot(data_8, aes(x=event_date, y=sold_count)) + geom_line() + labs(title = "baby wipes")
+acf2(data_8[,sold_count])
+```
+
+There is not seasonality effect in the series. It may be transformed using Box-Cox transformation.
+
+```{r, warning=F, message=F}
+BoxCox.lambda(data_8[,sold_count], lower=0)
+```
+
+It is very close to zero, so a log transformation is appropriate.
+
+```{r, warning=F, message=F}
+data_8[,log_sold_count:=log(sold_count)]
+summary(ur.kpss(data_8[,log_sold_count]))
+```
+
+The data does not seem to be stationary as the unit root test suggests. 
+
+```{r, warning=F, message=F}
+data_8[,lag_log_sold_count:=shift(log_sold_count,1)]
+data_8[,dl_sold_count:=log_sold_count-lag_log_sold_count]
+summary(ur.kpss(data_8[,dl_sold_count]))
+```
+
+Now, stationarity can be assumed. At this point, a linear model can be fitted to the series. In order to use `basket_count`, it should be differenced as well. Also note the use of lagged differenced `basket_count`, since forecast for 2 periods ahead is needed.
+
+```{r, warning=F, message=F}
+data_8[,lag_basket_count:=shift(basket_count,1)]
+data_8[,diff_basket_count:=basket_count-lag_basket_count]
+data_8[,lag2_basket_count:=shift(basket_count,2)]
+data_8[,lag2_diff_basket_count:=shift(diff_basket_count,2)]
+lm_8_1 = lm(dl_sold_count~lag2_diff_basket_count+special+as.factor(wday), data_8)
+anova(lm_8_1)
+```
+
+Only `wday` variable seems to be important.
+
+```{r, warning=F, message=F}
+lm_8_1 = lm(dl_sold_count~as.factor(wday), data_8)
+summary(lm_8_1)
+data_8[,res_1:=c(NA,lm_8_1$residuals)]
+```
+
+So far, a linear model is fitted to differenced and transformed series. Now, as another modeling strategy, the original series is tried to be modeled linearly.
+
+```{r, warning=F, message=F}
+lm_8_2 = lm(sold_count~as.factor(special)+as.factor(wday)+lag2_basket_count, data_8)
+anova(lm_8_2)
+```
+
+All variables are highly significant.
+
+```{r, warning=F, message=F}
+summary(lm_8_2)
+data_8[,res_2:=c(rep(NA,2),residuals(lm_8_2))]
+summary(ur.kpss(data_8[,res_2])) 
+```
+
+Small test statistic suggests stationarity.
+
+In order to compare the models,
+
+
+```{r, warning=F, message=F}
+results=vector('list',length(test_dates))
+for(i in 1:length(test_dates)){
+  current_date=test_dates[i]-forecast_ahead
+  
+  past_data=data_8[event_date<=current_date]
+  forecast_data=data_8[event_date==test_dates[i]]
+  
+  # arima model
+  frcst=forecast_with_arima(past_data, forecast_ahead, target_name = "dl_sold_count", is_trace = F)
+  forecast_data[,arima_prediction:=round(exp(frcst$forecast[2]+
+                                             frcst$forecast[1]+
+                                             past_data[.N,c(log_sold_count)]),
+                                         0)]
+  # arimax model (wday)(not exactly arimax)
+  frcst=forecast_with_arima(past_data, forecast_ahead, target_name = "res_1", is_trace = F)  
+  reg1 = data.frame(wday=past_data[.N,ifelse(wday<7,wday+1,1)])
+  reg2 = data.frame(wday=past_data[.N,ifelse(wday<6,wday+2,ifelse(wday==6,1,2))])
+  forecast_data[,arimax_prediction_1:=round(exp(frcst$forecast[2]+
+                                              frcst$forecast[1]+
+                                              predict(lm_8_1,reg1)+
+                                              predict(lm_8_1,reg2)+
+                                              past_data[.N,c(log_sold_count)]),
+                                          0)]
+  
+  # arimax model (special)(not exactly arimax)
+  frcst=forecast_with_arima(past_data, forecast_ahead, target_name = "res_2", is_trace = F)  
+  reg = data.frame(special=as.factor(forecast_data[1,special]),
+                   lag2_basket_count=past_data[.N,lag2_basket_count],
+                   wday=past_data[.N,ifelse(wday<6,wday+2,ifelse(wday==6,1,2))])
+  forecast_data[,arimax_prediction_2:=round(frcst$forecast[2]+
+                                            predict(lm_8_2,reg),
+                                            0)]
+  
+  results[[i]]=forecast_data
+}
+overall_results=rbindlist(results)
+melted_result_8=melt(overall_results,c('event_date','sold_count'),
+                     c('arima_prediction','arimax_prediction_1','arimax_prediction_2'))
+performance_8= melted_result_8[,accu(sold_count,value),by=list(variable)]        
+performance_8
+```
+
+The first model seems to be better than others.
+
+```{r, warning=F, message=F}
+model_8=forecast_with_arima(data_8,forecast_ahead = 2, target_name = "dl_sold_count")
+checkresiduals(model_8$model) 
+fcst[1,8] = round(exp(model_8$forecast[2]+
+                    model_8$forecast[1]+
+                    data_8[.N,c(log_sold_count)]),
+                0)
+```
+
+Regarding the available information, the model seems to be adequate in terms of its residuals.
+
+
+### Product 9
+
+```{r, warning=F, message=F}
+ggplot(data_9, aes(x=event_date, y=sold_count)) + geom_line() + labs(title = "electric toothbrush")
+acf2(data_9[,sold_count])
+```
+
+There is not seasonality effect. It may be transformed using Box-Cox transformation.
+
+```{r, warning=F, message=F}
+BoxCox.lambda(data_9[,sold_count], lower=0)
+```
+
+It is not that close to zero, so the following transformation is appropriate.
+
+```{r, warning=F, message=F}
+lambda_9 = BoxCox.lambda(data_9[,sold_count], lower=0)
+data_9[,bc_sold_count:=BoxCox(sold_count, lambda = lambda_9)]
+summary(ur.kpss(data_9[,bc_sold_count]))
+```
+
+The data does not seem to be stationary as the unit root test suggests. 
+
+```{r, warning=F, message=F}
+data_9[,lag_bc_sold_count:=shift(bc_sold_count,1)]
+data_9[,dbc_sold_count:=bc_sold_count-lag_bc_sold_count]
+summary(ur.kpss(data_9[,dbc_sold_count]))
+```
+
+Now, stationarity can be assumed. At this point, a linear model can be fitted to the series. In order to use `basket_count`, it should be differenced as well. Also note the use of lagged differenced `basket_count`, since forecast for 2 periods ahead is needed.
+
+```{r, warning=F, message=F}
+data_9[,lag_basket_count:=shift(basket_count,1)]
+data_9[,diff_basket_count:=basket_count-lag_basket_count]
+data_9[,lag2_basket_count:=shift(basket_count,2)]
+data_9[,lag2_diff_basket_count:=shift(diff_basket_count,2)]
+lm_9_1 = lm(dbc_sold_count~lag2_diff_basket_count+special+as.factor(wday), data_9)
+anova(lm_9_1)
+```
+
+None of these variables are important.
+
+Now, as the second modeling strategy, the original series is tried to be modeled linearly.
+
+```{r, warning=F, message=F}
+lm_9_2 = lm(sold_count~as.factor(special)+as.factor(wday)+lag2_basket_count, data_9)
+anova(lm_9_2)
+```
+
+If only the important variables to be used,
+
+```{r, warning=F, message=F}
+lm_9_2 = lm(sold_count~lag2_basket_count, data_9)
+summary(lm_9_2)
+data_9[,res:=c(rep(NA,2),residuals(lm_9_2))]
+summary(ur.kpss(data_9[,res])) 
+```
+
+Large test statistic suggests that differencing is required for stationarity.
+
+```{r, warning=F, message=F}
+data_9[,lag_res:=shift(res,1)]
+data_9[,d_res:=res-lag_res]
+summary(ur.kpss(data_9[,d_res])) 
+```
+
+In order to compare the models,
+
+
+```{r, warning=F, message=F}
+results=vector('list',length(test_dates))
+for(i in 1:length(test_dates)){
+  current_date=test_dates[i]-forecast_ahead
+  
+  past_data=data_9[event_date<=current_date]
+  forecast_data=data_9[event_date==test_dates[i]]
+  
+  # arima model
+  frcst=forecast_with_arima(past_data, forecast_ahead, target_name = "dbc_sold_count", is_trace = F)
+  forecast_data[,arima_prediction:=round(InvBoxCox(frcst$forecast[2]+
+                                                   frcst$forecast[1]+
+                                                   past_data[.N,c(bc_sold_count)],
+                                                   lambda = lambda_9),
+                                         0)]
+  
+  # arimax model (special)(not exactly arimax)
+  frcst=forecast_with_arima(past_data, forecast_ahead, target_name = "d_res", is_trace = F)  
+  reg = data.frame(lag2_basket_count=past_data[.N,lag2_basket_count])
+  forecast_data[,arimax_prediction:=round(frcst$forecast[2]+
+                                          frcst$forecast[1]+  
+                                          predict(lm_9_2,reg)+
+                                          past_data[.N,res],
+                                          0)]
+  
+  results[[i]]=forecast_data
+}
+overall_results=rbindlist(results)
+melted_result_9=melt(overall_results,c('event_date','sold_count'),
+                     c('arima_prediction','arimax_prediction'))
+performance_9= melted_result_9[,accu(sold_count,value),by=list(variable)]        
+performance_9
+```
+
+The second model is better.
+
+```{r, warning=F, message=F}
+model_9=forecast_with_arima(data_9,forecast_ahead = 2, target_name = "d_res")
+checkresiduals(model_9$model) 
+reg = data.frame(lag2_basket_count=data_9[.N,lag2_basket_count])
+fcst[1,9] = round(model_9$forecast[2]+
+                model_9$forecast[1]+
+                predict(lm_9_2,reg)+
+                data_9[.N,c(res)],
+                0)
+```
+
+Regarding the available information, the model seems to be adequate in terms of its residuals.
+
+## Regarding the Forecasts
+
+At the end forecasts are as follows:
+
+```{r, warning=F, message=F}
+predictions=unique(data[,list(product_content_id)])
+for(i in 1:9){
+  predictions[product_content_id==fcst[2,i],forecast:=fcst[1,i]]
+}
+```
+
+```{r, warning=F, message=F}
+print(predictions)
+```
+
+## Conclusion
+
+In this project, number of sales of several products which are sold on Trendyol are tried to be forecasted with time series forecasting methods. Effects of seasonality is not observed in the number of sales. Some products were not stationary, thus a differencing is made to make the number of sales of those products stationary. Generally, WMAPE is used as a metric to compare the models. For some products ARIMA model yields a lower WMAPE value. On the other hand, ARIMAX models is better for the remaining products. If the number of sales is modeled with ARIMAX models, lagged `wday`, `special`, and `basket_count` variables are used and in some cases, their differenced versions are used.
+
+## Appendix
+
+For some of the models, it may be confusing to understand how predictions are made. The following equations explain some of them.
+
+#### First Model
+Let _A_ be the prediction provided by ARIMA. 
+
+ARIMA on dl_$Y_{t}$ (differenced and logged)
+
+$log\hat{Y}_{t+2}-log\hat{Y}_{t+1}= A_{t+2}$
+
+$log\hat{Y}_{t+1}-log{Y}_{t}= A_{t+1}$
+
+Combining them
+
+$log\hat{Y}_{t+2}= A_{t+1}+A_{t+2}+log{Y}_{t}$
+
+$\hat{Y}_{t+2}=e^{ (A_{t+1}+A_{t+2}+log{Y}_{t})}$
+
+#### Second Model
+
+$log\hat{Y}_{t+2}-log\hat{Y}_{t+1}=f(X_{t+2})+\hatε_{t+2}$
+
+$log\hat{Y}_{t+1}-log\hat{Y}_{t}=f(X_{t+1})+\hatε_{t+1}$
+
+$log\hat{Y}_{t+2}=f(X_{t+2})+f(X_{t+1})+\hatε_{t+2}+\hatε_{t+1}+log{Y}_{t}$
+
+where $f$ is the prediction provided by linear model.
+
+$\hatε_{t+2}=A_{t+2}$ and $\hatε_{t+1}=A_{t+1}$
+
+Thus,
+
+$\hat{Y}_{t+2}=e^{(f(X_{t+2})+f(X_{t+1})+A_{t+2}+A_{t+1}+log{Y}_{t})}$
+
+#### Last Model
+
+$\hat{Y}_{t+2}=f(X_{t+2})+\hatε_{t+2}$
+
+$\hatε_{t+2}=A_{t+2}$
+
+$\hat{Y}_{t+2}=f(X_{t+2})+A_{t+2}$
