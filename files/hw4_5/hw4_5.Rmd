@@ -319,6 +319,12 @@ performance
 
 ARIMA(2,0,2) provides the best result.
 
+```{r}
+checkresiduals(arma_1_4)
+```
+
+All assumptions on residuals seem to hold.
+
 Now we can add some regressors to the model. Again note that these are lagged variables.
 
 ```{r, message=FALSE, warning=FALSE}
@@ -407,6 +413,12 @@ c(ar1=AIC(ar_2_1), ar2=AIC(ar_2_2), ma1=AIC(ma_2_1), ma2=AIC(ma_2_2), arma1=AIC(
 
 ARIMA(2,0,1) provides the best AIC value. We can check their performance on the training data.
 
+
+```{r}
+checkresiduals(arma_2_3)
+```
+
+All assumptions on residuals seem to hold but the normality assumption is not that strong.
 
 ```{r}
 data_2[,fitted_1_0:=random_2-ar_2_1$residuals+dcmp_2$daily$trend+dcmp_2$daily$seasonal]
@@ -518,6 +530,13 @@ ARIMA(3,0,3) provides the best AIC value. We can check their performance on the 
 
 
 ```{r}
+checkresiduals(arma_3_4)
+```
+
+All assumptions on residuals seem to hold.
+
+
+```{r}
 data_3[,fitted_2_0:=random_3-ar_3_1$residuals+dcmp_3$daily$trend+dcmp_3$daily$seasonal]
 data_3[,fitted_3_0:=random_3-ar_3_2$residuals+dcmp_3$daily$trend+dcmp_3$daily$seasonal]
 data_3[,fitted_0_2:=random_3-ma_3_1$residuals+dcmp_3$daily$trend+dcmp_3$daily$seasonal]
@@ -623,6 +642,13 @@ c(ar1=AIC(ar_4_1), ar2=AIC(ar_4_2), ar3=AIC(ar_4_3), arma1=AIC(arma_4_1), arma2=
 ```
 
 ARIMA(3,0,1) provides the best AIC value. We can check their performance on the training data.
+
+
+```{r}
+checkresiduals(arma_4_1)
+```
+
+Assumptions are not strongly hold. Nevertheless, we cannot improve them at this point.
 
 
 ```{r}
@@ -747,6 +773,13 @@ c(ar1=AIC(ar_5_1), ar2=AIC(ar_5_2), ar3=AIC(ar_5_3), arma1=AIC(arma_5_1), arma2=
 ```
 
 ARIMA(5,0,1) provides the best AIC value. We can check their performance on the training data.
+
+
+```{r}
+checkresiduals(arma_5_3)
+```
+
+Assumptions seem to hold somehow.
 
 
 ```{r}
@@ -878,6 +911,12 @@ ARIMA(3,0,1) provides the best AIC value. We can check their performance on the 
 
 
 ```{r}
+checkresiduals(arma_6_1)
+```
+
+Assumptions are not strongly hold. Nevertheless, we cannot improve them at this point.
+
+```{r}
 data_6[,fitted_3_0:=random_6-ar_6_1$residuals+dcmp_6$daily$trend+dcmp_6$daily$seasonal]
 data_6[,fitted_4_0:=random_6-ar_6_2$residuals+dcmp_6$daily$trend+dcmp_6$daily$seasonal]
 data_6[,fitted_5_0:=random_6-ar_6_3$residuals+dcmp_6$daily$trend+dcmp_6$daily$seasonal]
@@ -1006,6 +1045,11 @@ c(ar1=AIC(ar_7_1), ar2=AIC(ar_7_2), ar3=AIC(ar_7_3), arma1=AIC(arma_7_1), arma2=
 
 ARIMA(5,0,1) provides the best AIC value. We can check their performance on the training data.
 
+```{r}
+checkresiduals(arma_7_3)
+```
+
+Assumptions are not strongly hold. But we can move on.
 
 ```{r}
 data_7[,fitted_3_0:=random_7-ar_7_1$residuals+dcmp_7$daily$trend+dcmp_7$daily$seasonal]
@@ -1133,6 +1177,11 @@ c(ar1=AIC(ar_8_1), ar2=AIC(ar_8_2), ma1=AIC(ma_8_1), ma2=AIC(ma_8_2), arma1=AIC(
 
 ARIMA(2,0,4) provides the best AIC value. We can check their performance on the training data.
 
+```{r}
+checkresiduals(arma_8_2)
+```
+
+Assumptions on residuals seem to hold somehow.
 
 ```{r}
 data_8[,fitted_2_0:=random_8-ar_8_1$residuals+dcmp_8$daily$trend+dcmp_8$daily$seasonal]
@@ -1245,6 +1294,11 @@ c(ar1=AIC(ar_9_1), ar2=AIC(ar_9_2), ar3=AIC(ar_9_3), arma1=AIC(arma_9_1), arma2=
 
 ARIMA(5,0,1) provides the best AIC value. We can check their performance on the training data.
 
+```{r}
+checkresiduals(arma_9_3)
+```
+
+Constant variance assumption does not seem to hold but others are fine.
 
 ```{r}
 data_9[,fitted_3_0:=random_9-ar_9_1$residuals+dcmp_9$daily$trend+dcmp_9$daily$seasonal]
