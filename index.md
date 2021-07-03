@@ -12,6 +12,9 @@
 ## Homework 3
 [Here](files/hw3/hw3.html) is my time series forecasting study.
 
+## Homework 4&5
+[Here](files/hw4_5/hw4_5.html) is our different modeling strategies for different products.
+
 ## Final Exam
 [Here](files/final/final.html) is my solution to the final exam.
 

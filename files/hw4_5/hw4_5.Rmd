@@ -1,0 +1,1322 @@
+---
+title: "Developing Different Forecasting Strategies for Different Type of Products"
+author: Osman Oguz Nuhoglu, Beste Yildiz Yilmaz, Efe Ahmet Guden - IE360 - Spring
+  2021
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+require(jsonlite)
+require(httr)
+require(data.table)
+library(urca)
+library(forecast)
+library(ggplot2)
+library(astsa)
+library(GGally)
+library(datetime)
+library(lubridate)
+```
+
+# Introduction
+
+The aim of this homework is to develop alternative forecasting strategies for different products as in the final project. First, the time series of different products will be decomposed at different levels and the trend-cycle component and the seasonality effects will be analyzed. Then, several ARIMA models will be built and evaluated based on their performace on the training set. After building ARIMA models, several regressors will be added to the models. After adding regressors, ARIMA and ARIMAX will be compared based on their performance on a test period. The aim is to improve the model on the final project. All tasks will be performed separately for each product. Products are very different in nature but there are two main categories. The data for product 1,2, and 3 is only available after some point in time. This does not hold for the other products. We define decomposition function later on. One can see how we implement the function for these two main categories.
+
+
+# Data Manipulation
+
+In this homework, we use updated data, therefore the following chunk of code is enough for manipulation.
+
+```{r, echo=FALSE}
+require(jsonlite)
+require(httr)
+require(data.table)
+
+data1 = fread("ProjectRawData_Updated.csv",header=TRUE)
+
+get_token <- function(username, password, url_site){
+    
+    post_body = list(username=username,password=password)
+    post_url_string = paste0(url_site,'/token/')
+    result = POST(post_url_string, body = post_body)
+
+    # error handling (wrong credentials)
+    if(result$status_code==400){
+        print('Check your credentials')
+        return(0)
+    }
+    else if (result$status_code==201){
+        output = content(result)
+        token = output$key
+    }
+
+    return(token)
+}
+
+get_data <- function(start_date='2020-03-20', token, url_site){
+    
+    post_body = list(start_date=start_date,username=username,password=password)
+    post_url_string = paste0(url_site,'/dataset/')
+    
+    header = add_headers(c(Authorization=paste('Token',token,sep=' ')))
+    result = GET(post_url_string, header, body = post_body)
+    output = content(result)
+    data = data.table::rbindlist(output)
+    data[,event_date:=as.Date(event_date)]
+    data = data[order(product_content_id,event_date)]
+    return(data)
+}
+subm_url = 'http://46.101.163.177'
+u_name = "Group1"
+p_word = "xja3s47rmKxxoZ81"
+submit_now = FALSE
+
+username = u_name
+password = p_word
+
+token = get_token(username=u_name, password=p_word, url=subm_url)
+data2 = get_data(token=token,url=subm_url)
+```
+
+```{r}
+data1[,price:=round(price,2)]
+data1[,event_date:=as.Date(event_date, format = "%d/%m/%Y")]
+data1 = data1[order(event_date, decreasing = FALSE)]
+data = rbind(data1,data2)
+data = data[event_date<"2021-07-01"]
+head(data,10)
+tail(data,10)
+```
+
+As stated before, some of the variables will be added to models. But we cannot add all of them because some of them has flaws. For example, `visit_count`, `favored_count`, `category_brand_sold`, `ty_visits`, `category_basket` are not available for a part of the data. Also, `category_visits` is not stable over time, it has an obvious trend and it cannot be used. Lastly, `price` is not reliable either because when there is no sales, `price` turns out to be -1 which does not make any sense. Also using lagged price does not make sense because people does not consider price level of the past when they buy something. 
+
+```{r}
+data[,c("visit_count","favored_count","category_brand_sold","ty_visits","category_basket"):=NULL]
+data[,category_visits:=NULL]
+data[,price:=NULL]
+data[,lag_basket_count:=shift(basket_count,2)]
+data[,lag_category_sold:=shift(category_sold,2)]
+data[,lag_category_favored:=shift(category_favored,2)]
+```
+
+
+We split the data into 9 parts, each corresponding to different products.
+
+```{r}
+data_1 = data[product_content_id==48740784] #coat
+data_2 = data[product_content_id==73318567] #bikini top 1
+data_3 = data[product_content_id==32737302] #bikini top 2
+data_4 = data[product_content_id==31515569] #tight
+data_5 = data[product_content_id==6676673]  #headphones
+data_6 = data[product_content_id==7061886]  #vacuum cleaner
+data_7 = data[product_content_id==85004]    #face cleanser
+data_8 = data[product_content_id==4066298]  #baby wipe
+data_9 = data[product_content_id==32939029] #electric toothbrush
+```
+
+# Function Definitions
+
+The first two functions below will be used in order to decompose the series at different levels. Note that the first function assumes that the trend-cycle component is constant over time because there are only 15 data points in monthly aggregated data and it is not possible to find both trend and seasonality at the same time. It is not a meaningless assumption because the time period subject to this analysis is 15 months. Also note that random component of weekly and monthly decomposition is discarded because they will not be used in building models.
+The second function will be used only for the first three products. Because they are limited, we cannot decompose them at monthly level.
+Other than that, we will use two more functions for decomposition part of this homework. One of them is for plotting the trend-cycle components and the other one is for plotting the seasonal component.
+The last function is defined in order to compare different models and it is taken from the lecture notes as well.
+
+```{r}
+
+decomp = function(data){
+    daily = ts(data[,sold_count], freq=7)
+    daily_decomp = decompose(daily)
+    daily_decomp = list(trend=daily_decomp$trend, seasonal=daily_decomp$seasonal,
+                        figure=daily_decomp$figure, random=daily_decomp$random)
+    
+    data[,t:=1:.N]
+    data[,week:=floor(1+(t-1)/7)]
+    weekly = data[, .(sold=mean(sold_count)), by=.(week=week)]
+    weekly = weekly[, sold]
+    weekly = ts(weekly, freq = 4)
+    weekly_decomp = decompose(weekly)
+    weekly_decomp = list(trend=weekly_decomp$trend, figure=weekly_decomp$figure)
+    data[,c("t","week"):=NULL]
+    
+    monthly = data[, list(sold=mean(sold_count)), by=list(month(event_date), year(event_date))]
+    monthly[,mean:=mean(sold)]
+    monthly[,trend:=filter(sold, sides=2, filter=rep(1/12,12))]
+    monthly[,detrended:=sold-mean]
+    monthly[,seasonal:=mean(detrended), by=.(month)]
+    monthly_decomp = list(trend=monthly[,trend], aggregated=monthly[,sold], figure=monthly[1:12,seasonal])
+
+    result=list(daily=daily_decomp, weekly=weekly_decomp, monthly=monthly_decomp)
+    return(result)
+}
+decomp_limited = function(data){
+    daily = ts(data[,sold_count], freq=7)
+    daily_decomp = decompose(daily)
+    daily_decomp = list(trend=daily_decomp$trend, seasonal=daily_decomp$seasonal,
+                        figure=daily_decomp$figure, random=daily_decomp$random)
+    
+    data[,t:=1:.N]
+    data[,week:=floor(1+(t-1)/7)]
+    weekly = data[, .(sold=mean(sold_count)), by=.(week=week)]
+    weekly = weekly[, sold]
+    weekly = ts(weekly, freq = 4)
+    weekly_decomp = decompose(weekly)
+    weekly_decomp = list(trend=weekly_decomp$trend, figure=weekly_decomp$figure)
+    data[,c("t","week"):=NULL]
+    
+    result=list(daily=daily_decomp, weekly=weekly_decomp)
+    return(result)
+}
+plotdcmp_seasonal = function(decomposed){
+    
+    if(length(decomposed)==3){
+      par(mfrow=c(3,1))
+      plot(decomposed$daily$figure, type="l",ylab="Seasonal", main="Daily Decomposition")
+      plot(decomposed$weekly$figure, type="l",ylab="Seasonal", main="Weekly Decomposition")
+      plot(decomposed$monthly$figure, type="l", ylab="Seasonal", main="Monthly Decomposition")
+    } else{
+      par(mfrow=c(2,1))
+      plot(decomposed$daily$figure, type="l",ylab="Seasonal", main="Daily Decomposition")
+      plot(decomposed$weekly$figure, type="l",ylab="Seasonal", main="Weekly Decomposition")
+    }
+}
+plotdcmp_trend = function(decomposed){
+    if(length(decomposed)==3){
+      par(mfrow=c(3,1))
+      plot(decomposed$daily$trend, type="l",ylab="Trend-Cycle", main="Daily Decomposition")
+      plot(decomposed$weekly$trend, type="l",ylab="Trend-Cycle", main="Weekly Decomposition")
+      plot(decomposed$monthly$trend, type="l", ylab="Trend-Cycle", main="Monthly Decomposition")
+    } else{
+      par(mfrow=c(2,1))
+      plot(decomposed$daily$trend, type="l",ylab="Trend-Cycle", main="Daily Decomposition")
+      plot(decomposed$weekly$trend, type="l",ylab="Trend-Cycle", main="Weekly Decomposition")
+    }
+}
+accu_na=function(actual,forecast){
+  actual=actual[4:(length(actual)-3)]
+  forecast=forecast[4:(length(forecast)-3)]
+  n=length(actual)
+  error=actual-forecast
+  mean=mean(actual)
+  sd=sd(actual)
+  CV=sd/mean
+  FBias=sum(error)/sum(actual)
+  MAPE=sum(abs(error/actual))/n
+  RMSE=sqrt(sum(error^2)/n)
+  MAD=sum(abs(error))/n
+  MADP=sum(abs(error))/sum(abs(actual))
+  WMAPE=MAD/mean
+  l=data.frame(n,mean,sd,CV,FBias,MAPE,RMSE,MAD,MADP,WMAPE)
+  return(l)
+}
+accu=function(actual,forecast){
+  n=length(actual)
+  error=actual-forecast
+  mean=mean(actual)
+  sd=sd(actual)
+  CV=sd/mean
+  FBias=sum(error)/sum(actual)
+  MAPE=sum(abs(error/actual))/n
+  RMSE=sqrt(sum(error^2)/n)
+  MAD=sum(abs(error))/n
+  MADP=sum(abs(error))/sum(abs(actual))
+  WMAPE=MAD/mean
+  l=data.frame(n,mean,sd,CV,FBias,MAPE,RMSE,MAD,MADP,WMAPE)
+  return(l)
+}
+```
+
+# Analysis
+
+Before starting, we define a train and test period for comparing ARIMA and ARIMAX models. Note that the test period ends on 2021-06-27 because the last three random component will be NAs. 
+
+```{r}
+forecast_ahead=2
+train_start=as.Date('2020-05-25')
+test_start=as.Date('2021-06-21')
+test_end=as.Date('2021-06-27')
+test_dates=seq(test_start,test_end,by='day')
+```
+
+
+## Product 1
+
+
+The plot of the series is shown below.
+
+```{r}
+ggplot(data_1, aes(x=event_date, y=sold_count)) + geom_line() + labs(title = "Coat") + ylab("Sales") + xlab("Date")
+```
+
+There were probably some stockout problems. Note that this product can be highly affected by seasons due to its nature. There is no need to use the data between Oct 2020 and Nov 2020 because that period represents another season. We only take the last part of the data into account.
+
+```{r, warning=F, message=F}
+data_1 = data_1[event_date>="2021-05-09"]
+ggplot(data_1, aes(x=event_date, y=sold_count)) + geom_line() + labs(title = "coat")
+```
+
+Now, we cannot decompose the series at monthly level because we observe only 2 months. Therefore we use the function `decomp_limited()`.
+
+```{r}
+dcmp_1 = decomp_limited(data = data_1)
+plotdcmp_trend(dcmp_1)
+```
+
+Now the data is so limited that we cannot observe a trend-cycle component even for the weekly decomposition.
+
+We can also check the seasonal components of the series.
+
+```{r}
+plotdcmp_seasonal(dcmp_1)
+```
+
+Slightly larger sales volume is observed on day 4 of the week which corresponds to Thursday. On the other hand, slightly smaller sales volume is observed on Sunday and Monday. The first week of the month has the smallest sales volume. On the other hand, the last week of the month has the largest sales volume. Note that we observe only 8 weeks therefore we should not trust these outcomes.
+
+At this point, we can try to model the random component of the daily decomposition with an ARIMA model. First we need to check the properties of the random component.
+
+```{r}
+random_1=dcmp_1$daily$random
+data_1[,trend:=dcmp_1$daily$trend]
+data_1[,seasonal:=dcmp_1$daily$seasonal]
+data_1[,random:=random_1]
+summary(ur.kpss(random_1))
+acf2(random_1, main="Random Component")
+```
+
+Now we try several ARIMA models.
+
+```{r}
+ar_1_1=arima(random_1, order=c(1,0,0))
+ar_1_2=arima(random_1, order=c(2,0,0))
+ma_1_1=arima(random_1, order=c(0,0,1))
+ma_1_2=arima(random_1, order=c(0,0,2))
+arma_1_1=arima(random_1, order=c(1,0,1))
+arma_1_2=arima(random_1, order=c(1,0,2))
+arma_1_3=arima(random_1, order=c(2,0,1))
+arma_1_4=arima(random_1, order=c(2,0,2))
+c(ar1=AIC(ar_1_1), ar2=AIC(ar_1_2), ma1=AIC(ma_1_1), ma2=AIC(ma_1_2), arma1=AIC(arma_1_1), arma2=AIC(arma_1_2), arma3=AIC(arma_1_3), arma4=AIC(arma_1_4))
+```
+
+ARIMA(2,0,2) provides the best AIC value. We can check their performance on the training data.
+
+
+```{r}
+data_1[,fitted_1_0:=random_1-ar_1_1$residuals+dcmp_1$daily$trend+dcmp_1$daily$seasonal]
+data_1[,fitted_2_0:=random_1-ar_1_2$residuals+dcmp_1$daily$trend+dcmp_1$daily$seasonal]
+data_1[,fitted_0_1:=random_1-ma_1_1$residuals+dcmp_1$daily$trend+dcmp_1$daily$seasonal]
+data_1[,fitted_0_2:=random_1-ma_1_1$residuals+dcmp_1$daily$trend+dcmp_1$daily$seasonal]
+data_1[,fitted_1_1:=random_1-arma_1_1$residuals+dcmp_1$daily$trend+dcmp_1$daily$seasonal]
+data_1[,fitted_1_2:=random_1-arma_1_2$residuals+dcmp_1$daily$trend+dcmp_1$daily$seasonal]
+data_1[,fitted_2_1:=random_1-arma_1_3$residuals+dcmp_1$daily$trend+dcmp_1$daily$seasonal]
+data_1[,fitted_2_2:=random_1-arma_1_4$residuals+dcmp_1$daily$trend+dcmp_1$daily$seasonal]
+
+melted_result=melt(data_1, c("event_date","sold_count"), 
+                   c("fitted_1_0","fitted_2_0", "fitted_0_1", "fitted_0_2",
+                     "fitted_1_1","fitted_1_2", "fitted_2_1", "fitted_2_2"))
+
+performance=melted_result[,accu_na(sold_count, value), by=list(variable)]
+performance
+```
+
+ARIMA(2,0,2) provides the best result.
+
+Now we can add some regressors to the model. Again note that these are lagged variables.
+
+```{r, message=FALSE, warning=FALSE}
+ggpairs(data_1[,c("random","lag_category_favored","lag_category_sold","lag_basket_count")])
+```
+
+None of the lagged variables has significant effect. We cannot add those variables, instead we stick to the ARIMA model. Although it does not make much sense to check the measures without comparing it with another model, we can check those.
+
+```{r, warning=FALSE, message=FALSE}
+results=vector('list',length(test_dates))
+for(i in 1:length(test_dates)){
+  current_date=test_dates[i]-forecast_ahead
+  
+  past_data=data_1[event_date<=current_date]
+  forecast_data=data_1[event_date==test_dates[i]]
+  
+  # arima model
+  frcst=arima(past_data[,ts(random)], order=c(2,0,2))
+  frcst=forecast(frcst, h=forecast_ahead)
+  forecast_data[,arima_prediction:=round(frcst$mean[2]+as.numeric(trend)+as.numeric(seasonal), 0)]
+  
+  results[[i]]=forecast_data
+}
+overall_results=rbindlist(results)
+melted_result=melt(overall_results,c('event_date','sold_count'),
+                     c('arima_prediction'))
+performance= melted_result[,accu(sold_count,value),by=list(variable)]        
+performance
+```
+
+## Product 2
+
+```{r, warning=F, message=F}
+ggplot(data_2, aes(x=event_date, y=sold_count)) + geom_line() + labs(title = "bikini top 1")  
+```
+
+The data does not seem to be reliable until 2021-05-01, probably because of stockouts or production related problems. Therefore, only the last part of the time series will be used.
+
+```{r, warning=F, message=F}
+data_2 = data_2[event_date>="2021-04-28"]
+ggplot(data_2, aes(x=event_date, y=sold_count)) + geom_line() + labs(title = "bikini top 1")
+```
+
+
+Now, we cannot decompose the series at monthly level because we observe only 2 months. Therefore we use the function `decomp_limited()`.
+
+```{r}
+dcmp_2 = decomp_limited(data = data_2)
+plotdcmp_trend(dcmp_2)
+```
+
+We see a level decrease in the fifth week, if we look at the daily decomposition's trend-cycle component. Note that the data is so limited that we cannot observe a trend-cycle component even for the weekly decomposition.
+
+We can also check the seasonal components of the series.
+
+```{r}
+plotdcmp_seasonal(dcmp_2)
+```
+
+The two largest sales volumes are observed on day 4 and 5 of the week which corresponds to Thursday and Friday, respetively. On the other hand, the two smallest sales volumes are observed on Wednesday and Saturday. The second week of the month has the smallest sales volume. On the other hand, the first week of the month has significantly larger sales volume. Note that we observe only 10 weeks therefore we should not trust these outcomes.
+
+At this point, we can try to model the random component of the daily decomposition with an ARIMA model. First we need to check the properties of the random component.
+
+```{r}
+random_2=dcmp_2$daily$random
+data_2[,trend:=dcmp_2$daily$trend]
+data_2[,seasonal:=dcmp_2$daily$seasonal]
+data_2[,random:=random_2]
+summary(ur.kpss(random_2))
+acf2(random_2, main="Random Component")
+```
+
+The unit root test suggests that the series is stationary. We can try to fit different ARIMA models.
+
+```{r}
+ar_2_1=arima(random_2, order=c(1,0,0))
+ar_2_2=arima(random_2, order=c(2,0,0))
+ma_2_1=arima(random_2, order=c(0,0,1))
+ma_2_2=arima(random_2, order=c(0,0,2))
+arma_2_1=arima(random_2, order=c(1,0,1))
+arma_2_2=arima(random_2, order=c(1,0,2))
+arma_2_3=arima(random_2, order=c(2,0,1))
+arma_2_4=arima(random_2, order=c(2,0,2))
+c(ar1=AIC(ar_2_1), ar2=AIC(ar_2_2), ma1=AIC(ma_2_1), ma2=AIC(ma_2_2), arma1=AIC(arma_2_1), arma2=AIC(arma_2_2), arma3=AIC(arma_2_3), arma4=AIC(arma_2_4))
+```
+
+ARIMA(2,0,1) provides the best AIC value. We can check their performance on the training data.
+
+
+```{r}
+data_2[,fitted_1_0:=random_2-ar_2_1$residuals+dcmp_2$daily$trend+dcmp_2$daily$seasonal]
+data_2[,fitted_2_0:=random_2-ar_2_2$residuals+dcmp_2$daily$trend+dcmp_2$daily$seasonal]
+data_2[,fitted_0_1:=random_2-ma_2_1$residuals+dcmp_2$daily$trend+dcmp_2$daily$seasonal]
+data_2[,fitted_0_2:=random_2-ma_2_1$residuals+dcmp_2$daily$trend+dcmp_2$daily$seasonal]
+data_2[,fitted_1_1:=random_2-arma_2_1$residuals+dcmp_2$daily$trend+dcmp_2$daily$seasonal]
+data_2[,fitted_1_2:=random_2-arma_2_2$residuals+dcmp_2$daily$trend+dcmp_2$daily$seasonal]
+data_2[,fitted_2_1:=random_2-arma_2_3$residuals+dcmp_2$daily$trend+dcmp_2$daily$seasonal]
+data_2[,fitted_2_2:=random_2-arma_2_4$residuals+dcmp_2$daily$trend+dcmp_2$daily$seasonal]
+
+melted_result=melt(data_2, c("event_date","sold_count"), 
+                   c("fitted_1_0","fitted_2_0", "fitted_0_1", "fitted_0_2",
+                     "fitted_1_1","fitted_1_2", "fitted_2_1", "fitted_2_2"))
+
+performance=melted_result[,accu_na(sold_count, value), by=list(variable)]
+performance
+```
+
+ARIMA(2,0,1) model provides the best result.
+
+Now we can add some regressors to the model. Again note that these are lagged variables.
+
+```{r, message=FALSE, warning=FALSE}
+ggpairs(data_2[,c("random","lag_category_favored","lag_category_sold","lag_basket_count")])
+```
+
+None of the lagged variables has significant effect. We cannot add those variables, instead we stick to the ARIMA model. Although it does not make much sense to check the measures without comparing it with another model, we can check those.
+
+```{r, warning=FALSE, message=FALSE}
+results=vector('list',length(test_dates))
+for(i in 1:length(test_dates)){
+  current_date=test_dates[i]-forecast_ahead
+  
+  past_data=data_2[event_date<=current_date]
+  forecast_data=data_2[event_date==test_dates[i]]
+  
+  # arima model
+  frcst=arima(past_data[,ts(random)], order=c(2,0,1))
+  frcst=forecast(frcst, h=forecast_ahead)
+  forecast_data[,arima_prediction:=round(frcst$mean[2]+as.numeric(trend)+as.numeric(seasonal), 0)]
+  
+  results[[i]]=forecast_data
+}
+overall_results=rbindlist(results)
+melted_result=melt(overall_results,c('event_date','sold_count'),
+                     c('arima_prediction'))
+performance= melted_result[,accu(sold_count,value),by=list(variable)]        
+performance
+```
+
+## Product 3
+
+```{r, warning=F, message=F}
+ggplot(data_3, aes(x=event_date, y=sold_count)) + geom_line() + labs(title = "bikini top 2")  
+```
+
+The data is not reliable until 2021-02-20, probably because of stockouts or production related problems.
+
+```{r, warning=F, message=F}
+data_3 = data_3[event_date>="2021-02-20"]
+ggplot(data_3, aes(x=event_date, y=sold_count)) + geom_line() + labs(title = "bikini top 2")
+```
+
+
+Now, we cannot decompose the series at monthly level because we observe only 4 months. Therefore we use the function `decomp_limited()`.
+
+```{r}
+dcmp_3 = decomp_limited(data = data_3)
+plotdcmp_trend(dcmp_3)
+```
+
+Now the weekly decomposition provides smoother curve for trend-cycle component. First, it decreases slightly and increase afterwards.
+
+We can also check the seasonal components of the series.
+
+```{r}
+plotdcmp_seasonal(dcmp_3)
+```
+
+The two largest sales volumes are observed on day 4 and 5 of the week which corresponds to Thursday and Friday, respetively. On the other hand, the smallest sales volume is observed on Monday. The fourth week of the month has the smallest sales volume. On the other hand, the first week and the third week of the month have significantly larger sales volume.
+
+At this point, we can try to model the random component of the daily decomposition with an ARIMA model. First we need to check the properties of the random component.
+
+```{r}
+random_3=dcmp_3$daily$random
+data_3[,trend:=dcmp_3$daily$trend]
+data_3[,seasonal:=dcmp_3$daily$seasonal]
+data_3[,random:=random_3]
+summary(ur.kpss(random_3))
+acf2(random_3, main="Random Component")
+```
+
+The unit root test suggests that the series is stationary. We can try to fit different ARIMA models.
+
+```{r, warning=FALSE}
+ar_3_1=arima(random_3, order=c(2,0,0))
+ar_3_2=arima(random_3, order=c(3,0,0))
+ma_3_1=arima(random_3, order=c(0,0,2))
+ma_3_2=arima(random_3, order=c(0,0,3))
+arma_3_1=arima(random_3, order=c(2,0,2))
+arma_3_2=arima(random_3, order=c(2,0,3))
+arma_3_3=arima(random_3, order=c(3,0,2))
+arma_3_4=arima(random_3, order=c(3,0,3))
+c(ar1=AIC(ar_3_1), ar2=AIC(ar_3_2), ma1=AIC(ma_3_1), ma2=AIC(ma_3_2), arma1=AIC(arma_3_1), arma2=AIC(arma_3_2), arma3=AIC(arma_3_3), arma4=AIC(arma_3_4))
+```
+
+ARIMA(3,0,3) provides the best AIC value. We can check their performance on the training data.
+
+
+```{r}
+data_3[,fitted_2_0:=random_3-ar_3_1$residuals+dcmp_3$daily$trend+dcmp_3$daily$seasonal]
+data_3[,fitted_3_0:=random_3-ar_3_2$residuals+dcmp_3$daily$trend+dcmp_3$daily$seasonal]
+data_3[,fitted_0_2:=random_3-ma_3_1$residuals+dcmp_3$daily$trend+dcmp_3$daily$seasonal]
+data_3[,fitted_0_3:=random_3-ma_3_1$residuals+dcmp_3$daily$trend+dcmp_3$daily$seasonal]
+data_3[,fitted_2_2:=random_3-arma_3_1$residuals+dcmp_3$daily$trend+dcmp_3$daily$seasonal]
+data_3[,fitted_2_3:=random_3-arma_3_2$residuals+dcmp_3$daily$trend+dcmp_3$daily$seasonal]
+data_3[,fitted_3_2:=random_3-arma_3_3$residuals+dcmp_3$daily$trend+dcmp_3$daily$seasonal]
+data_3[,fitted_3_3:=random_3-arma_3_4$residuals+dcmp_3$daily$trend+dcmp_3$daily$seasonal]
+
+melted_result=melt(data_3, c("event_date","sold_count"), 
+                   c("fitted_2_0","fitted_3_0", "fitted_0_2", "fitted_0_3",
+                     "fitted_2_2","fitted_2_3", "fitted_3_2", "fitted_3_3"))
+
+performance=melted_result[,accu_na(sold_count, value), by=list(variable)]
+performance
+```
+
+ARIMA(3,0,3) model provides the best result.
+
+Now we can add some regressors to the model. Again note that these are lagged variables.
+
+```{r, message=FALSE, warning=FALSE}
+ggpairs(data_3[,c("random","lag_category_favored","lag_category_sold","lag_basket_count")])
+```
+
+None of the lagged variables has significant effect. We cannot add those variables, instead we stick to the ARIMA model. Although it does not make much sense to check the measures without comparing it with another model, we can check those.
+
+```{r, warning=FALSE, message=FALSE}
+results=vector('list',length(test_dates))
+for(i in 1:length(test_dates)){
+  current_date=test_dates[i]-forecast_ahead
+  
+  past_data=data_3[event_date<=current_date]
+  forecast_data=data_3[event_date==test_dates[i]]
+  
+  # arima model
+  frcst=arima(past_data[,ts(random)], order=c(3,0,3))
+  frcst=forecast(frcst, h=forecast_ahead)
+  forecast_data[,arima_prediction:=round(frcst$mean[2]+as.numeric(trend)+as.numeric(seasonal), 0)]
+  
+  results[[i]]=forecast_data
+}
+overall_results=rbindlist(results)
+melted_result=melt(overall_results,c('event_date','sold_count'),
+                     c('arima_prediction'))
+performance= melted_result[,accu(sold_count,value),by=list(variable)]        
+performance
+```
+
+## Product 4
+
+The plot of the series is shown below.
+
+```{r}
+ggplot(data_4, aes(x=event_date, y=sold_count)) + geom_line() + labs(title = "Tight") + ylab("Sales") + xlab("Date")
+```
+
+Some of these points cannot be explained by seasonality or trend only, we may need other regressors.
+
+Now, we decompose the series using the predefined function `decomp()`.
+
+```{r}
+dcmp_4 = decomp(data = data_4)
+plotdcmp_trend(dcmp_4)
+```
+
+We can see that weekly trend-cycle component smoothes the series better. We see an increase in the 6th month and a decrease in the 7th month. Monthly decomposition is meaningless as stated before since there are only 14 months. Instead, we can check monthly aggregated data.
+
+```{r}
+plot(dcmp_4$monthly$aggregated, type="l", xlab="Month", ylab="Average Sales", main="Monthly Aggregated Series")
+```
+
+This is even smoother now. We can also check the seasonal components of the series.
+
+```{r}
+plotdcmp_seasonal(dcmp_4)
+```
+
+We see that the second, the third, and the fourth days of the week, sales volume is larger. Note that the first day of the week corresponds to Monday. In addition to this, sales volume is larger in the first week of the month, but this result is not so reliable because of the approximation discussed earlier. Monthly seasonality effect is not so reliable either because it is not an actual decomposition (see the earlier discussion on this). But we see that sales volume is larger in the summer.
+
+At this point, we can try to model the random component of the daily decomposition with an ARIMA model. First we need to check the properties of the random component.
+
+```{r}
+random_4=dcmp_4$daily$random
+data_4[,trend:=dcmp_4$daily$trend]
+data_4[,seasonal:=dcmp_4$daily$seasonal]
+data_4[,random:=random_4]
+summary(ur.kpss(random_4))
+acf2(random_4, main="Random Component")
+```
+
+It can be assumed stationary and ACF and PACF suggest that there is some level of dependency among the observations. ARIMA model can catch these. MA model is not suitable for this series but AR model may be suitable. We can try couple of models and compare them based on AIC values.
+
+
+```{r}
+ar_4_1=arima(random_4, order=c(3,0,0))
+ar_4_2=arima(random_4, order=c(4,0,0))
+ar_4_3=arima(random_4, order=c(5,0,0))
+arma_4_1=arima(random_4, order=c(3,0,1))
+arma_4_2=arima(random_4, order=c(4,0,1))
+arma_4_3=arima(random_4, order=c(5,0,1))
+c(ar1=AIC(ar_4_1), ar2=AIC(ar_4_2), ar3=AIC(ar_4_3), arma1=AIC(arma_4_1), arma2=AIC(arma_4_2), arma3=AIC(arma_4_3))
+```
+
+ARIMA(3,0,1) provides the best AIC value. We can check their performance on the training data.
+
+
+```{r}
+data_4[,fitted_3_0:=random_4-ar_4_1$residuals+dcmp_4$daily$trend+dcmp_4$daily$seasonal]
+data_4[,fitted_4_0:=random_4-ar_4_2$residuals+dcmp_4$daily$trend+dcmp_4$daily$seasonal]
+data_4[,fitted_5_0:=random_4-ar_4_3$residuals+dcmp_4$daily$trend+dcmp_4$daily$seasonal]
+data_4[,fitted_3_1:=random_4-arma_4_1$residuals+dcmp_4$daily$trend+dcmp_4$daily$seasonal]
+data_4[,fitted_4_1:=random_4-arma_4_2$residuals+dcmp_4$daily$trend+dcmp_4$daily$seasonal]
+data_4[,fitted_5_1:=random_4-arma_4_3$residuals+dcmp_4$daily$trend+dcmp_4$daily$seasonal]
+
+melted_result=melt(data_4, c("event_date","sold_count"), 
+                   c("fitted_3_0","fitted_4_0", "fitted_5_0", "fitted_3_1",
+                     "fitted_4_1","fitted_5_1"))
+
+performance=melted_result[,accu_na(sold_count, value), by=list(variable)]
+performance
+```
+
+We see that ARIMA(3,0,1) gives the best result.
+
+Now we can add some regressors to the model. Again note that these are lagged variables.
+
+```{r, message=FALSE, warning=FALSE}
+ggpairs(data_4[,c("random","lag_category_favored","lag_category_sold","lag_basket_count")])
+```
+
+`lag_category_favored` seems to be the most important one but it may not be reliable because it depends on the whole category of products. Instead, we can use `lag_basket_count`. 
+
+```{r}
+lm_4=lm(random~lag_basket_count, data=data_4)
+summary(lm_4)
+```
+
+It is somehow significant but R-squared value is too small. Nevertheless we can try to add this variable to the ARIMA(3,0,1) model.
+
+Now we compare ARIMA(3,0,1) and the new ARIMAX model on the test period defined earlier.
+
+```{r, warning=FALSE, message=FALSE}
+results=vector('list',length(test_dates))
+for(i in 1:length(test_dates)){
+  current_date=test_dates[i]-forecast_ahead
+  
+  past_data=data_4[event_date<=current_date]
+  forecast_data=data_4[event_date==test_dates[i]]
+  
+  # arima model
+  frcst=arima(past_data[,ts(random)], order=c(3,0,1))
+  frcst=forecast(frcst, h=forecast_ahead)
+  forecast_data[,arima_prediction:=round(frcst$mean[2]+as.numeric(trend)+as.numeric(seasonal), 0)]
+  
+  # arimax model
+  reg = matrix(past_data[,lag_basket_count], ncol=1)
+  frcst=auto.arima(past_data[,ts(random)],max.p=3,start.p=3,max.q=1,start.q=1,xreg=reg,seasonal=FALSE,stepwise=FALSE,approximation=FALSE)
+  reg = matrix(past_data[(.N-1):.N, basket_count], ncol=1)
+  frcst=forecast(frcst, h=forecast_ahead, xreg=reg)  
+  forecast_data[,arimax_prediction:=round(frcst$mean[2]+as.numeric(trend)+as.numeric(seasonal), 0)]
+  
+  results[[i]]=forecast_data
+}
+overall_results=rbindlist(results)
+melted_result=melt(overall_results,c('event_date','sold_count'),
+                     c('arima_prediction','arimax_prediction'))
+performance= melted_result[,accu(sold_count,value),by=list(variable)]        
+performance
+```
+
+Measures indicate that ARIMA(3,0,1) gives better results than ARIMAX gives.
+
+## Product 5
+
+The plot of the series is shown below.
+
+```{r}
+ggplot(data_5, aes(x=event_date, y=sold_count)) + geom_line() + labs(title = "Headphones") + ylab("Sales") + xlab("Date")
+```
+
+Similar to the previous products, some of these points cannot be explained by seasonality or trend only, we may need other regressors.
+
+Now, we decompose the series using function `decomp()`.
+
+```{r}
+dcmp_5 = decomp(data = data_5)
+plotdcmp_trend(dcmp_5)
+```
+
+Weekly decomposition provides smoother curve. There is not an obvious trend. The series fluctuates. Also note that monthly decomposition does not make sense again. We can still check the aggregated data visually.
+
+```{r}
+plot(dcmp_5$monthly$aggregated, type="l", xlab="Month", ylab="Average Sales", main="Monthly Aggregated Series")
+```
+
+Monthly aggregated data is even smoother. We can also check the seasonal components of the series.
+
+```{r}
+plotdcmp_seasonal(dcmp_5)
+```
+
+In general, the largest sales volume is observed on day 4 of the week which corresponds to Thursday. On the other hand, the smallest sales volume is observed on Sunday, generally. Weekly decomposition is not trustable, but it shows approximately how the week of the month affects the sales. The first and the last week of the month have the smallest sales. Lastly, the sales volume tends to be larger in the spring and the winter. Monthly discussion is not too trustable as well (see earlier discussion).
+
+At this point, we can try to model the random component of the daily decomposition with an ARIMA model. First we need to check the properties of the random component.
+
+```{r}
+random_5=dcmp_5$daily$random
+data_5[,trend:=dcmp_5$daily$trend]
+data_5[,seasonal:=dcmp_5$daily$seasonal]
+data_5[,random:=random_5]
+summary(ur.kpss(random_5))
+acf2(random_5, main="Random Component")
+```
+
+It can be assumed stationary and ACF and PACF suggest that there is some level of dependency among the observations. Note that there is no seasonality effect on the random component as expected. An ARIMA model can be suitable. MA model would not be appropriate for this series but AR model may be suitable. We can try couple of models and compare them based on AIC values. Note that ACF and PACF is very similar to those of product 4.
+
+
+```{r}
+ar_5_1=arima(random_5, order=c(3,0,0))
+ar_5_2=arima(random_5, order=c(4,0,0))
+ar_5_3=arima(random_5, order=c(5,0,0))
+arma_5_1=arima(random_5, order=c(3,0,1))
+arma_5_2=arima(random_5, order=c(4,0,1))
+arma_5_3=arima(random_5, order=c(5,0,1))
+c(ar1=AIC(ar_5_1), ar2=AIC(ar_5_2), ar3=AIC(ar_5_3), arma1=AIC(arma_5_1), arma2=AIC(arma_5_2), arma3=AIC(arma_5_3))
+```
+
+ARIMA(5,0,1) provides the best AIC value. We can check their performance on the training data.
+
+
+```{r}
+data_5[,fitted_3_0:=random_5-ar_5_1$residuals+dcmp_5$daily$trend+dcmp_5$daily$seasonal]
+data_5[,fitted_4_0:=random_5-ar_5_2$residuals+dcmp_5$daily$trend+dcmp_5$daily$seasonal]
+data_5[,fitted_5_0:=random_5-ar_5_3$residuals+dcmp_5$daily$trend+dcmp_5$daily$seasonal]
+data_5[,fitted_3_1:=random_5-arma_5_1$residuals+dcmp_5$daily$trend+dcmp_5$daily$seasonal]
+data_5[,fitted_4_1:=random_5-arma_5_2$residuals+dcmp_5$daily$trend+dcmp_5$daily$seasonal]
+data_5[,fitted_5_1:=random_5-arma_5_3$residuals+dcmp_5$daily$trend+dcmp_5$daily$seasonal]
+
+melted_result=melt(data_5, c("event_date","sold_count"), 
+                   c("fitted_3_0","fitted_4_0", "fitted_5_0", "fitted_3_1",
+                     "fitted_4_1","fitted_5_1"))
+
+performance=melted_result[,accu_na(sold_count, value), by=list(variable)]
+performance
+```
+
+We see that ARIMA(5,0,1) gives the best result.
+
+Now we can add some regressors to the model. Again note that these are lagged variables.
+
+```{r, message=FALSE, warning=FALSE}
+ggpairs(data_5[,c("random","lag_category_favored","lag_category_sold","lag_basket_count")])
+```
+
+`lag_category_favored` seems to be the most important one and this time we have to use it because other regressors do not have significant relationship with sales.
+
+
+```{r}
+lm_5=lm(random~lag_category_favored, data=data_5)
+summary(lm_5)
+```
+
+It is very significant but R-squared value is too small. Nevertheless we can try to add this variable to the ARIMA(5,0,1) model.
+
+Now we compare ARIMA(5,0,1) and the new ARIMAX model on the test period.
+
+```{r message=FALSE, warning=FALSE}
+results=vector('list',length(test_dates))
+for(i in 1:length(test_dates)){
+  current_date=test_dates[i]-forecast_ahead
+  
+  past_data=data_5[event_date<=current_date]
+  forecast_data=data_5[event_date==test_dates[i]]
+  
+  # arima model
+  frcst=arima(past_data[,ts(random)], order=c(5,0,1))
+  frcst=forecast(frcst, h=forecast_ahead)
+  forecast_data[,arima_prediction:=round(frcst$mean[2]+as.numeric(trend)+as.numeric(seasonal), 0)]
+
+  # arimax model
+  reg = matrix(past_data[,lag_category_favored], ncol=1)
+  frcst=auto.arima(past_data[,ts(random)],max.p=5,start.p=5,max.q=1,start.q=1,xreg=reg,seasonal=FALSE,stepwise=FALSE,approximation=FALSE)
+  reg = matrix(past_data[(.N-1):.N, category_favored], ncol=1)
+  frcst=forecast(frcst, h=forecast_ahead, xreg=reg)  
+  forecast_data[,arimax_prediction:=round(frcst$mean[2]+as.numeric(trend)+as.numeric(seasonal), 0)]
+  
+  results[[i]]=forecast_data
+}
+overall_results=rbindlist(results)
+melted_result=melt(overall_results,c('event_date','sold_count'),
+                   c('arima_prediction','arimax_prediction'))
+performance= melted_result[,accu(sold_count,value),by=list(variable)]        
+performance
+```
+
+ARIMA model provides better results.
+
+## Product 6
+
+The plot of the series is shown below.
+
+```{r}
+ggplot(data_6, aes(x=event_date, y=sold_count)) + geom_line() + labs(title = "Vacuum Cleaner") + ylab("Sales") + xlab("Date")
+```
+
+Similarly, some of these points cannot be explained by seasonality or trend only, we may need other regressors.
+
+Now, we decompose the series using `decomp()`. 
+
+```{r}
+dcmp_6 = decomp(data = data_6)
+plotdcmp_trend(dcmp_6)
+```
+
+Again, weekly trend-cycle component smooths the series better. If we look at the weekly decomposition, we see a peak in the 7th month. Daily decomposition shows two peak points, probably due to discounts. From now on, we skip the discussion on the monthly decomposition.
+
+```{r}
+plot(dcmp_6$monthly$aggregated, type="l", xlab="Month", ylab="Average Sales", main="Monthly Aggregated Series")
+```
+
+This is even smoother now. We can also check the seasonal components of the series.
+
+```{r}
+plotdcmp_seasonal(dcmp_6)
+```
+
+
+
+
+We see that the second, the third, and the fourth days of the week, sales volume is larger but it is smaller especially on Saturday. In addition to this, sales volume is larger in the first week of the month, but this result is not so reliable as stated before. Monthly seasonality effect is not so reliable either because it is not an actual decomposition. But we see that sales volume is larger in the summer. Discussion on weekly and monthly decomposition will be skipped from now on, either.
+
+At this point, we can try to model the random component of the daily decomposition with an ARIMA model. First we need to check the properties of the random component.
+
+```{r}
+random_6=dcmp_6$daily$random
+data_6[,trend:=dcmp_6$daily$trend]
+data_6[,seasonal:=dcmp_6$daily$seasonal]
+data_6[,random:=random_6]
+summary(ur.kpss(random_6))
+acf2(random_6, main="Random Component")
+```
+
+It seems stationary and ACF and PACF suggest that there is some level of dependency among the observations. MA model is not suitable for this series but AR model may be suitable. We can try couple of models and compare them based on AIC values. Note that ACF and PACF is very similar to those of product 4 and product 5.
+
+
+```{r}
+ar_6_1=arima(random_6, order=c(3,0,0))
+ar_6_2=arima(random_6, order=c(4,0,0))
+ar_6_3=arima(random_6, order=c(5,0,0))
+arma_6_1=arima(random_6, order=c(3,0,1))
+arma_6_2=arima(random_6, order=c(4,0,1))
+arma_6_3=arima(random_6, order=c(5,0,1))
+c(ar1=AIC(ar_6_1), ar2=AIC(ar_6_2), ar3=AIC(ar_6_3), arma1=AIC(arma_6_1), arma2=AIC(arma_6_2), arma3=AIC(arma_6_3))
+```
+
+ARIMA(3,0,1) provides the best AIC value. We can check their performance on the training data.
+
+
+```{r}
+data_6[,fitted_3_0:=random_6-ar_6_1$residuals+dcmp_6$daily$trend+dcmp_6$daily$seasonal]
+data_6[,fitted_4_0:=random_6-ar_6_2$residuals+dcmp_6$daily$trend+dcmp_6$daily$seasonal]
+data_6[,fitted_5_0:=random_6-ar_6_3$residuals+dcmp_6$daily$trend+dcmp_6$daily$seasonal]
+data_6[,fitted_3_1:=random_6-arma_6_1$residuals+dcmp_6$daily$trend+dcmp_6$daily$seasonal]
+data_6[,fitted_4_1:=random_6-arma_6_2$residuals+dcmp_6$daily$trend+dcmp_6$daily$seasonal]
+data_6[,fitted_5_1:=random_6-arma_6_3$residuals+dcmp_6$daily$trend+dcmp_6$daily$seasonal]
+
+melted_result=melt(data_6, c("event_date","sold_count"), 
+                   c("fitted_3_0","fitted_4_0", "fitted_5_0", "fitted_3_1",
+                     "fitted_4_1","fitted_5_1"))
+
+performance=melted_result[,accu_na(sold_count, value), by=list(variable)]
+performance
+```
+
+As opposed to AIC values, ARIMA(4,0,1) gives the best result when comparing the models on the training set.
+
+Now we can add some regressors to the model. Again note that these are lagged variables.
+
+```{r, message=FALSE, warning=FALSE}
+ggpairs(data_6[,c("random","lag_category_favored","lag_category_sold","lag_basket_count")])
+```
+
+Now we try all three variables.
+
+```{r}
+lm_6=lm(random~lag_category_favored+lag_category_sold+lag_basket_count, data=data_6)
+anova(lm_6)
+```
+
+We can update the linear model according to the anova table.
+
+```{r}
+lm_6=lm(random~lag_category_favored+lag_category_sold, data=data_6)
+summary(lm_6)
+```
+
+With two significant variables, a relatively large R-squared value is achieved.
+
+Now we compare ARIMA(4,0,1) and the new ARIMAX model on the test period.
+
+```{r message=FALSE, warning=FALSE}
+results=vector('list',length(test_dates))
+for(i in 1:length(test_dates)){
+  current_date=test_dates[i]-forecast_ahead
+  
+  past_data=data_6[event_date<=current_date]
+  forecast_data=data_6[event_date==test_dates[i]]
+  
+  # arima model
+  frcst=arima(past_data[,ts(random)], order=c(4,0,1))
+  frcst=forecast(frcst, h=forecast_ahead)
+  forecast_data[,arima_prediction:=round(frcst$mean[2]+as.numeric(trend)+as.numeric(seasonal), 0)]
+
+  # arimax model
+  reg = matrix(c(past_data[,lag_category_favored], past_data[,lag_category_sold]), ncol=2)
+  frcst=auto.arima(past_data[,ts(random)],max.p=4,start.p=4,max.q=1,start.q=1,xreg=reg,seasonal=FALSE,stepwise=FALSE,approximation=FALSE)
+  reg = matrix(c(past_data[(.N-1):.N, category_favored], past_data[(.N-1):.N, category_sold]), ncol=2)
+  frcst=forecast(frcst, h=forecast_ahead, xreg=reg)  
+  forecast_data[,arimax_prediction:=round(frcst$mean[2]+as.numeric(trend)+as.numeric(seasonal), 0)]
+  
+  results[[i]]=forecast_data
+}
+overall_results=rbindlist(results)
+melted_result=melt(overall_results,c('event_date','sold_count'),
+                   c('arima_prediction','arimax_prediction'))
+performance= melted_result[,accu(sold_count,value),by=list(variable)]        
+performance
+```
+
+ARIMAX is significantly worse than ARIMA model. Adding two regressors did not help.
+
+## Product 7
+
+The plot of the series is shown below.
+
+```{r}
+ggplot(data_7, aes(x=event_date, y=sold_count)) + geom_line() + labs(title = "Face Cleanser") + ylab("Sales") + xlab("Date")
+```
+
+Some of these points cannot be explained by seasonality or trend only, we may need other regressors.
+
+Now, we decompose the series.
+```{r}
+dcmp_7 = decomp(data = data_7)
+plotdcmp_trend(dcmp_7)
+```
+
+Similarly, weekly decomposition provides smoother trend-cycle curve. Weekly decomposition suggests that there is an increase in the level after the 6th month. Also we see some peak points. Now we check the monthly aggregated data.
+
+```{r}
+plot(dcmp_7$monthly$aggregated, type="l", xlab="Month", ylab="Average Sales", main="Monthly Aggregated Series")
+```
+
+This is even smoother now. We can also check the seasonal components of the series.
+
+```{r}
+plotdcmp_seasonal(dcmp_7)
+```
+
+We see that the second, the third, and the fourth days of the week, sales volume is larger but now y scale is shorter. In addition to this, sales volume is larger in the first week of the month and linearly decreasing over time. Sales volume tends to increase in the summer and the fall.
+
+At this point, we can try to model the random component of the daily decomposition with an ARIMA model. First we need to check the properties of the random component.
+
+```{r}
+random_7=dcmp_7$daily$random
+data_7[,trend:=dcmp_7$daily$trend]
+data_7[,seasonal:=dcmp_7$daily$seasonal]
+data_7[,random:=random_7]
+summary(ur.kpss(random_7))
+acf2(random_7, main="Random Component")
+```
+
+It can be assumed stationary and ACF and PACF suggest that there is some level of dependency among the observations. We can try couple of models and compare them based on AIC values. Note that ACF and PACF is very similar to those of the other products.
+
+
+```{r}
+ar_7_1=arima(random_7, order=c(3,0,0))
+ar_7_2=arima(random_7, order=c(4,0,0))
+ar_7_3=arima(random_7, order=c(5,0,0))
+arma_7_1=arima(random_7, order=c(3,0,1))
+arma_7_2=arima(random_7, order=c(4,0,1))
+arma_7_3=arima(random_7, order=c(5,0,1))
+c(ar1=AIC(ar_7_1), ar2=AIC(ar_7_2), ar3=AIC(ar_7_3), arma1=AIC(arma_7_1), arma2=AIC(arma_7_2), arma3=AIC(arma_7_3))
+```
+
+ARIMA(5,0,1) provides the best AIC value. We can check their performance on the training data.
+
+
+```{r}
+data_7[,fitted_3_0:=random_7-ar_7_1$residuals+dcmp_7$daily$trend+dcmp_7$daily$seasonal]
+data_7[,fitted_4_0:=random_7-ar_7_2$residuals+dcmp_7$daily$trend+dcmp_7$daily$seasonal]
+data_7[,fitted_5_0:=random_7-ar_7_3$residuals+dcmp_7$daily$trend+dcmp_7$daily$seasonal]
+data_7[,fitted_3_1:=random_7-arma_7_1$residuals+dcmp_7$daily$trend+dcmp_7$daily$seasonal]
+data_7[,fitted_4_1:=random_7-arma_7_2$residuals+dcmp_7$daily$trend+dcmp_7$daily$seasonal]
+data_7[,fitted_5_1:=random_7-arma_7_3$residuals+dcmp_7$daily$trend+dcmp_7$daily$seasonal]
+
+melted_result=melt(data_7, c("event_date","sold_count"), 
+                   c("fitted_3_0","fitted_4_0", "fitted_5_0", "fitted_3_1",
+                     "fitted_4_1","fitted_5_1"))
+
+performance=melted_result[,accu_na(sold_count, value), by=list(variable)]
+performance
+```
+
+We see that ARIMA(5,0,1) gives the best result.
+
+Now we can add some regressors to the model. Again note that these are lagged variables.
+
+```{r, message=FALSE, warning=FALSE}
+ggpairs(data_7[,c("random","lag_category_favored","lag_category_sold","lag_basket_count")])
+```
+
+`lag_category_favored` seems to be the most important one.
+
+
+```{r}
+lm_7=lm(random~lag_category_favored, data=data_7)
+summary(lm_7)
+```
+
+The relationship is very significant.
+
+Now we compare ARIMA(5,0,1) and the new ARIMAX model on the test period.
+
+```{r message=FALSE, warning=FALSE}
+results=vector('list',length(test_dates))
+for(i in 1:length(test_dates)){
+  current_date=test_dates[i]-forecast_ahead
+  
+  past_data=data_7[event_date<=current_date]
+  forecast_data=data_7[event_date==test_dates[i]]
+  
+  # arima model
+  frcst=arima(past_data[,ts(random)], order=c(5,0,1))
+  frcst=forecast(frcst, h=forecast_ahead)
+  forecast_data[,arima_prediction:=round(frcst$mean[2]+as.numeric(trend)+as.numeric(seasonal), 0)]
+
+  # arimax model
+  reg = matrix(past_data[,lag_category_favored], ncol=1)
+  frcst=auto.arima(past_data[,ts(random)],max.p=5,start.p=5,max.q=1,start.q=1,xreg=reg,seasonal=FALSE,stepwise=FALSE,approximation=FALSE)
+  reg = matrix(past_data[(.N-1):.N, category_favored], ncol=1)
+  frcst=forecast(frcst, h=forecast_ahead, xreg=reg)  
+  forecast_data[,arimax_prediction:=round(frcst$mean[2]+as.numeric(trend)+as.numeric(seasonal), 0)]
+  
+  results[[i]]=forecast_data
+}
+overall_results=rbindlist(results)
+melted_result=melt(overall_results,c('event_date','sold_count'),
+                   c('arima_prediction','arimax_prediction'))
+performance= melted_result[,accu(sold_count,value),by=list(variable)]        
+performance
+```
+
+ARIMA model provides better results again. If we are to build a forecast model, we would build ARIMA(5,0,1). Nevertheless, ARIMAX model provides smaller bias.
+
+## Product 8
+
+The plot of the series is shown below.
+
+```{r}
+ggplot(data_8, aes(x=event_date, y=sold_count)) + geom_line() + labs(title = "Baby Wipe") + ylab("Sales") + xlab("Date")
+```
+
+Some of these points cannot be explained by seasonality or trend only, we may need other regressors.
+
+Now, we decompose the series.
+
+```{r}
+dcmp_8 = decomp(data = data_8)
+plotdcmp_trend(dcmp_8)
+```
+
+We can see that weekly trend-cycle component smoothes the series better. There is also a sharp decrease in the 7th month and the sales starts increasing slightly after the 9th month. We can also check monthly aggregated data.
+
+```{r}
+plot(dcmp_8$monthly$aggregated, type="l", xlab="Month", ylab="Average Sales", main="Monthly Aggregated Series")
+```
+
+This is even smoother now. We can also check the seasonal components of the series.
+
+```{r}
+plotdcmp_seasonal(dcmp_8)
+```
+
+We see that sales volume is larger on the first and the second days of the week. In addition to this, sales volume is larger in the first week and the last week of the month, as opposed to the second and the third weeks. Lastly, we see that sales volume is larger in July and December. It is significantly lower in September.
+
+At this point, we can try to model the random component of the daily decomposition with an ARIMA model. First we need to check the properties of the random component.
+
+```{r}
+random_8=dcmp_8$daily$random
+data_8[,trend:=dcmp_8$daily$trend]
+data_8[,seasonal:=dcmp_8$daily$seasonal]
+data_8[,random:=random_8]
+summary(ur.kpss(random_8))
+acf2(random_8, main="Random Component")
+```
+
+The series is stationary but this time we need a more complicated ARIMA model. AR(p) or MA(q) may not be enough. 
+
+
+```{r}
+ar_8_1=arima(random_8, order=c(2,0,0))
+ar_8_2=arima(random_8, order=c(3,0,0))
+ma_8_1=arima(random_8, order=c(0,0,3))
+ma_8_2=arima(random_8, order=c(0,0,4))
+arma_8_1=arima(random_8, order=c(2,0,3))
+arma_8_2=arima(random_8, order=c(2,0,4))
+arma_8_3=arima(random_8, order=c(3,0,3))
+arma_8_4=arima(random_8, order=c(3,0,4))
+c(ar1=AIC(ar_8_1), ar2=AIC(ar_8_2), ma1=AIC(ma_8_1), ma2=AIC(ma_8_2), arma1=AIC(arma_8_1), arma2=AIC(arma_8_2), arma3=AIC(arma_8_3), arma4=AIC(arma_8_4))
+```
+
+ARIMA(2,0,4) provides the best AIC value. We can check their performance on the training data.
+
+
+```{r}
+data_8[,fitted_2_0:=random_8-ar_8_1$residuals+dcmp_8$daily$trend+dcmp_8$daily$seasonal]
+data_8[,fitted_3_0:=random_8-ar_8_2$residuals+dcmp_8$daily$trend+dcmp_8$daily$seasonal]
+data_8[,fitted_0_3:=random_8-ma_8_1$residuals+dcmp_8$daily$trend+dcmp_8$daily$seasonal]
+data_8[,fitted_0_4:=random_8-ma_8_1$residuals+dcmp_8$daily$trend+dcmp_8$daily$seasonal]
+data_8[,fitted_2_3:=random_8-arma_8_1$residuals+dcmp_8$daily$trend+dcmp_8$daily$seasonal]
+data_8[,fitted_2_4:=random_8-arma_8_2$residuals+dcmp_8$daily$trend+dcmp_8$daily$seasonal]
+data_8[,fitted_3_3:=random_8-arma_8_3$residuals+dcmp_8$daily$trend+dcmp_8$daily$seasonal]
+data_8[,fitted_3_4:=random_8-arma_8_4$residuals+dcmp_8$daily$trend+dcmp_8$daily$seasonal]
+
+melted_result=melt(data_8, c("event_date","sold_count"), 
+                   c("fitted_2_0","fitted_3_0", "fitted_0_3", "fitted_0_4",
+                     "fitted_2_3","fitted_2_4", "fitted_3_3", "fitted_3_4"))
+
+performance=melted_result[,accu_na(sold_count, value), by=list(variable)]
+performance
+```
+
+ARIMA(2,0,4) gives the best result.
+
+Now we can add some regressors to the model. Again note that these are lagged variables.
+
+```{r, message=FALSE, warning=FALSE}
+ggpairs(data_8[,c("random","lag_category_favored","lag_category_sold","lag_basket_count")])
+```
+
+No variable seems significant. We can ignore them for this product. Nevertheless we can check the measures on the test period.
+
+
+```{r message=FALSE, warning=FALSE}
+results=vector('list',length(test_dates))
+for(i in 1:length(test_dates)){
+  current_date=test_dates[i]-forecast_ahead
+  
+  past_data=data_5[event_date<=current_date]
+  forecast_data=data_5[event_date==test_dates[i]]
+  
+  # arima model
+  frcst=arima(past_data[,ts(random)], order=c(2,0,4))
+  frcst=forecast(frcst, h=forecast_ahead)
+  forecast_data[,arima_prediction:=round(frcst$mean[2]+as.numeric(trend)+as.numeric(seasonal), 0)]
+
+  results[[i]]=forecast_data
+}
+overall_results=rbindlist(results)
+melted_result=melt(overall_results,c('event_date','sold_count'),
+                   'arima_prediction')
+performance= melted_result[,accu(sold_count,value),by=list(variable)]        
+performance
+```
+
+We cannot reach a conclusion without comparing this with another model. 
+
+## Product 9
+
+
+The plot of the series is shown below.
+
+```{r}
+ggplot(data_9, aes(x=event_date, y=sold_count)) + geom_line() + labs(title = "Electric Toothbrush") + ylab("Sales") + xlab("Date")
+```
+
+Similar to the previous products, some of these points cannot be explained by seasonality or trend only, we may need other regressors.
+
+Now, we decompose the series using function `decomp()`.
+
+```{r}
+dcmp_9 = decomp(data = data_9)
+plotdcmp_trend(dcmp_9)
+```
+
+Weekly decomposition provides smoother curve. Sales is slightly increasing over time but it starts decreasing in the 13th month. The monthly aggregated data looks like this:
+
+```{r}
+plot(dcmp_9$monthly$aggregated, type="l", xlab="Month", ylab="Average Sales", main="Monthly Aggregated Series")
+```
+
+Monthly aggregated data is even smoother. We can also check the seasonal components of the series.
+
+```{r}
+plotdcmp_seasonal(dcmp_9)
+```
+
+In general, the largest sales volumes are observed on day 2 and 3 of the week which corresponds to Tuesday and Wednesday. On the other hand, the smallest sales volume is observed on Saturday, generally. Weekly decomposition is not trustable as discussed earlier, but it shows approximately how the week of the month affects the sales. The second week of the month has the largest sales and the fourth week has the smallest. Lastly, the sales volume tends to be larger in December and January. It is smaller in the spring and the summer, especially in March. 
+
+At this point, we can try to model the random component of the daily decomposition with an ARIMA model. First we need to check the properties of the random component.
+
+```{r}
+random_9=dcmp_9$daily$random
+data_9[,trend:=dcmp_9$daily$trend]
+data_9[,seasonal:=dcmp_9$daily$seasonal]
+data_9[,random:=random_9]
+summary(ur.kpss(random_9))
+acf2(random_9, main="Random Component")
+```
+
+It can be assumed stationary and ACF and PACF suggest that there is some level of dependency among the observations. ACF and PACF are similar to products 4,5, and 6. Thus, we try to same ARIMA models.
+
+
+```{r}
+ar_9_1=arima(random_9, order=c(3,0,0))
+ar_9_2=arima(random_9, order=c(4,0,0))
+ar_9_3=arima(random_9, order=c(5,0,0))
+arma_9_1=arima(random_9, order=c(3,0,1))
+arma_9_2=arima(random_9, order=c(4,0,1))
+arma_9_3=arima(random_9, order=c(5,0,1))
+c(ar1=AIC(ar_9_1), ar2=AIC(ar_9_2), ar3=AIC(ar_9_3), arma1=AIC(arma_9_1), arma2=AIC(arma_9_2), arma3=AIC(arma_9_3))
+```
+
+ARIMA(5,0,1) provides the best AIC value. We can check their performance on the training data.
+
+
+```{r}
+data_9[,fitted_3_0:=random_9-ar_9_1$residuals+dcmp_9$daily$trend+dcmp_9$daily$seasonal]
+data_9[,fitted_4_0:=random_9-ar_9_2$residuals+dcmp_9$daily$trend+dcmp_9$daily$seasonal]
+data_9[,fitted_5_0:=random_9-ar_9_3$residuals+dcmp_9$daily$trend+dcmp_9$daily$seasonal]
+data_9[,fitted_3_1:=random_9-arma_9_1$residuals+dcmp_9$daily$trend+dcmp_9$daily$seasonal]
+data_9[,fitted_4_1:=random_9-arma_9_2$residuals+dcmp_9$daily$trend+dcmp_9$daily$seasonal]
+data_9[,fitted_5_1:=random_9-arma_9_3$residuals+dcmp_9$daily$trend+dcmp_9$daily$seasonal]
+
+melted_result=melt(data_9, c("event_date","sold_count"), 
+                   c("fitted_3_0","fitted_4_0", "fitted_5_0", "fitted_3_1",
+                     "fitted_4_1","fitted_5_1"))
+
+performance=melted_result[,accu_na(sold_count, value), by=list(variable)]
+performance
+```
+
+We see that ARIMA(5,0,1) gives the best result.
+
+Now we can add some regressors to the model. Again note that these are lagged variables.
+
+```{r, message=FALSE, warning=FALSE}
+ggpairs(data_9[,c("random","lag_category_favored","lag_category_sold","lag_basket_count")])
+```
+
+Now we try all three variables.
+
+```{r}
+lm_9=lm(random~lag_category_favored+lag_category_sold+lag_basket_count, data=data_9)
+anova(lm_9)
+```
+
+We can update the linear model according to the anova table.
+
+```{r}
+lm_9=lm(random~lag_category_favored+lag_category_sold, data=data_9)
+summary(lm_9)
+```
+
+Only the `lag_category_sold` variable is significant. Now we compare ARIMA(5,0,1) and the new ARIMAX model on the test period.
+
+```{r message=FALSE, warning=FALSE}
+results=vector('list',length(test_dates))
+for(i in 1:length(test_dates)){
+  current_date=test_dates[i]-forecast_ahead
+  
+  past_data=data_9[event_date<=current_date]
+  forecast_data=data_9[event_date==test_dates[i]]
+  
+  # arima model
+  frcst=arima(past_data[,ts(random)], order=c(5,0,1))
+  frcst=forecast(frcst, h=forecast_ahead)
+  forecast_data[,arima_prediction:=round(frcst$mean[2]+as.numeric(trend)+as.numeric(seasonal), 0)]
+
+  # arimax model
+  reg = matrix(past_data[,lag_category_sold], ncol=1)
+  frcst=auto.arima(past_data[,ts(random)],max.p=5,start.p=5,max.q=1,start.q=1,xreg=reg,seasonal=FALSE,stepwise=FALSE,approximation=FALSE)
+  reg = matrix(past_data[(.N-1):.N, category_sold], ncol=1)
+  frcst=forecast(frcst, h=forecast_ahead, xreg=reg)  
+  forecast_data[,arimax_prediction:=round(frcst$mean[2]+as.numeric(trend)+as.numeric(seasonal), 0)]
+  
+  results[[i]]=forecast_data
+}
+overall_results=rbindlist(results)
+melted_result=melt(overall_results,c('event_date','sold_count'),
+                   c('arima_prediction','arimax_prediction'))
+performance= melted_result[,accu(sold_count,value),by=list(variable)]        
+performance
+```
+
+ARIMA model provides better results.
+
+# Conclusion
+
+To sum up, we analyzed the characteristics of different products by decomposing them at different levels and examining the components of them. Then we tried to model the random component of daily decomposition with ARIMA. After selecting the best ARIMA model, we tried to improve the model by adding available variables. First we checked if there is significant relationships between those variables and the sales. We added the variables accordingly and checked if the model is really improved. For these products, ARIMA has an edge over ARIMAX. For each products, ARIMA provides better results.
